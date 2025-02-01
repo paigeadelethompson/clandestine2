@@ -14,3 +14,43 @@ name = "ExampleNet"       # Network name
 max_clients = 1000       # Maximum number of clients
 max_channels = 500       # Maximum number of channels
 
+[hostmask]
+enabled = true
+format = "user/{user}/host/{host}"  # Variables: {user}, {host}, {ip}
+prefix = "cloaked"  # Results in: user/someuser/host/something.cloaked.example.con
+
+[database]
+path = "lines.json"      # Path to the database file
+persist_lines = true     # Whether to persist lines between restarts
+
+[access]
+# Lines specified here act as defaults
+# Additional lines can be added at runtime and persisted to database
+klines = [
+    { mask = "*!*@badhost.com", reason = "Banned host", set_by = "admin", duration = 3600 },
+]
+
+dlines = [
+    { ip = "192.168.1.100", reason = "Bad IP", set_by = "admin" },
+]
+
+glines = [
+    { mask = "*!*@spammer.com", reason = "Global ban", set_by = "admin" },
+]
+
+ilines = [
+    { mask = "*@trusted.com", class = "users", max_connections = 100 },
+]
+
+olines = [
+    { mask = "*!*@admin.com", password = "encrypted_pass", flags = ["kill", "rehash", "die"] },
+]
+
+ulines = [
+    { server = "services.example.com", flags = ["services"] },
+]
+
+alines = [
+    { mask = "*!*@auth.com", password = "auth_pass", class = "authenticated" },
+]
+

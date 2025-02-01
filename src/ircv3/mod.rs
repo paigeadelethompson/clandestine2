@@ -1,17 +1,38 @@
 use std::collections::HashSet;
+use std::fmt;
+use std::str::FromStr;
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
     MultiPrefix,
     ExtendedJoin,
-    AccountNotify,
-    AwayNotify,
-    ChgHost,
     ServerTime,
     MessageTags,
-    Batch,
-    LabeledResponse,
-    // Add more capabilities as needed
+}
+
+impl fmt::Display for Capability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Capability::MultiPrefix => write!(f, "multi-prefix"),
+            Capability::ExtendedJoin => write!(f, "extended-join"),
+            Capability::ServerTime => write!(f, "server-time"),
+            Capability::MessageTags => write!(f, "message-tags"),
+        }
+    }
+}
+
+impl FromStr for Capability {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "multi-prefix" => Ok(Capability::MultiPrefix),
+            "extended-join" => Ok(Capability::ExtendedJoin),
+            "server-time" => Ok(Capability::ServerTime),
+            "message-tags" => Ok(Capability::MessageTags),
+            _ => Err(()),
+        }
+    }
 }
 
 impl Capability {
@@ -19,28 +40,8 @@ impl Capability {
         match self {
             Capability::MultiPrefix => "multi-prefix",
             Capability::ExtendedJoin => "extended-join",
-            Capability::AccountNotify => "account-notify",
-            Capability::AwayNotify => "away-notify",
-            Capability::ChgHost => "chghost",
             Capability::ServerTime => "server-time",
             Capability::MessageTags => "message-tags",
-            Capability::Batch => "batch",
-            Capability::LabeledResponse => "labeled-response",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "multi-prefix" => Some(Capability::MultiPrefix),
-            "extended-join" => Some(Capability::ExtendedJoin),
-            "account-notify" => Some(Capability::AccountNotify),
-            "away-notify" => Some(Capability::AwayNotify),
-            "chghost" => Some(Capability::ChgHost),
-            "server-time" => Some(Capability::ServerTime),
-            "message-tags" => Some(Capability::MessageTags),
-            "batch" => Some(Capability::Batch),
-            "labeled-response" => Some(Capability::LabeledResponse),
-            _ => None,
         }
     }
 } 

@@ -6,6 +6,7 @@ mod ts6;
 mod error;
 mod cli;
 mod ircv3;
+mod database;
 
 use std::error::Error;
 use std::fs;
@@ -54,7 +55,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     })?;
     
     info!("Configuration loaded successfully");
-    let server = Server::new(config);
+    let server = Server::new(config).await?;
     
     info!("Starting server...");
     server.run().await?;

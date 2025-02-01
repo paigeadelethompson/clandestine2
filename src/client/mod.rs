@@ -1,16 +1,45 @@
-use crate::ts6::parser::parse_message;
-use crate::error::{IrcError, IrcResult};
-use crate::ts6::TS6Message;
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, AsyncReadExt};
-use tokio::net::TcpStream;
-use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
-use std::sync::atomic::{AtomicU32, Ordering};
-use crate::ircv3::Capability;
-use std::collections::HashSet;
-use chrono::Utc;
+// Submodules
+// mod handler;
+mod registration;
+mod capability;
+mod commands;
 
+// Standard library imports
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::{HashSet, VecDeque};
+use std::time::{Duration, Instant};
+use std::net::{SocketAddr, IpAddr};
+
+// Tokio imports
+use tokio::sync::Mutex;
+use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::net::TcpStream;
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+use tokio::task::JoinHandle;
+use tokio::sync::broadcast;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+
+// External crate imports
+use tracing::{debug, error, info, warn};
+use chrono::Utc;
+use regex::Regex;
+
+// Internal crate imports
+use crate::server::Server;
+use crate::ircv3::Capability;
+use crate::ts6::{TS6Message, parser::parse_message};
+use crate::error::{IrcError, IrcResult};
+use crate::config::{ServerConfig, HostmaskConfig};
+use crate::channel::Channel;
+
+// Re-exports
+// pub use handler::*;
+pub use registration::*;
+pub use capability::*;
+pub use commands::*;
+
+// Static counter for client IDs
 static NEXT_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
 
 fn generate_client_id() -> u32 {
@@ -18,272 +47,227 @@ fn generate_client_id() -> u32 {
 }
 
 pub struct Client {
-    pub(crate) id: u32,
+    id: u32,
     nickname: Option<String>,
     username: Option<String>,
     hostname: String,
+    ip_addr: IpAddr,
     registered: bool,
-    stream: Arc<Mutex<TcpStream>>,
     cap_negotiating: bool,
     enabled_capabilities: HashSet<Capability>,
     available_capabilities: HashSet<Capability>,
     account: Option<String>,
     realname: Option<String>,
     server_name: String,
+    server: Arc<Server>,
+    last_ping: Option<Instant>,
+    last_pong: Option<Instant>,
+    recvq: VecDeque<Vec<u8>>,
+    ping_timer: Option<JoinHandle<()>>,
+    tx: UnboundedSender<Vec<u8>>,         // For immediate writes
+    sendq_tx: UnboundedSender<Vec<u8>>,   // For queued messages
+    pong_tx: broadcast::Sender<()>,
+    modes: HashSet<char>,
+    ping_interval: Duration,
+    ping_timeout: Duration,
 }
 
 impl Client {
-    pub fn new(stream: TcpStream, addr: std::net::SocketAddr, server_name: String) -> Self {
-        debug!("Creating new client connection from {}", addr);
-        let mut available_capabilities = HashSet::new();
-        // Add supported capabilities
-        available_capabilities.insert(Capability::MultiPrefix);
-        available_capabilities.insert(Capability::ExtendedJoin);
-        available_capabilities.insert(Capability::ServerTime);
-        available_capabilities.insert(Capability::MessageTags);
+    const MAX_SENDQ: usize = 40960; // 40KB
+    const MAX_RECVQ: usize = 8192;  // 8KB
 
-        Self {
+    pub fn new(writer: OwnedWriteHalf, addr: SocketAddr, server_name: String, server: Arc<Server>) -> Self {
+        debug!("Creating new client connection from {}", addr);
+        
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (sendq_tx, mut sendq_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (pong_tx, _) = broadcast::channel(16);
+
+        // Get config values before moving server
+        let ping_interval = Duration::from_secs(server.config.timeouts.ping_interval);
+        let ping_timeout = Duration::from_secs(server.config.timeouts.ping_timeout);
+
+        // Spawn writer task that handles both immediate and queued messages
+        tokio::spawn(async move {
+            let mut writer = writer;
+            let mut current_sendq_size = 0;
+            
+            loop {
+                tokio::select! {
+                    // Handle immediate messages
+                    Some(msg) = rx.recv() => {
+                        debug!("Writer task: Got immediate message to send: {:?}", String::from_utf8_lossy(&msg));
+                        if let Err(e) = writer.write_all(&msg).await {
+                            error!("Failed to write to stream: {}", e);
+                            break;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            error!("Failed to flush stream: {}", e);
+                            break;
+                        }
+                    }
+                    
+                    // Handle queued messages
+                    Some(msg) = sendq_rx.recv() => {
+                        if current_sendq_size + msg.len() <= Self::MAX_SENDQ {
+                            current_sendq_size += msg.len();
+                            debug!("Writer task: Got queued message to send: {:?}", String::from_utf8_lossy(&msg));
+                            if let Err(e) = writer.write_all(&msg).await {
+                                error!("Failed to write to stream: {}", e);
+                                break;
+                            }
+                            if let Err(e) = writer.flush().await {
+                                error!("Failed to flush stream: {}", e);
+                                break;
+                            }
+                            current_sendq_size = current_sendq_size.saturating_sub(msg.len());
+                        } else {
+                            debug!("Dropping message due to sendq full");
+                        }
+                    }
+                }
+            }
+            debug!("Writer task: Channel closed, exiting");
+        });
+
+        let mut client = Self {
             id: generate_client_id(),
             nickname: None,
             username: None,
             hostname: addr.ip().to_string(),
+            ip_addr: addr.ip(),
             registered: false,
-            stream: Arc::new(Mutex::new(stream)),
             cap_negotiating: false,
             enabled_capabilities: HashSet::new(),
-            available_capabilities,
+            available_capabilities: HashSet::new(),
             account: None,
             realname: None,
             server_name,
-        }
+            server: server.clone(),
+            last_ping: None,
+            last_pong: None,
+            recvq: VecDeque::new(),
+            ping_timer: None,
+            tx,
+            sendq_tx,
+            pong_tx,
+            modes: HashSet::new(),
+            ping_interval,
+            ping_timeout,
+        };
+        
+        client
+    }
+
+    fn start_ping_timer(&mut self) {
+        let client_id = self.id;
+        let tx = self.tx.clone();
+        let mut pong_rx = self.pong_tx.subscribe();
+        let server_name = self.server_name.clone();
+        let ping_interval = self.ping_interval;
+        let ping_timeout = self.ping_timeout;
+        
+        self.ping_timer = Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(ping_interval);
+            let mut last_ping = Instant::now();
+            let mut last_pong = Instant::now();
+            
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Check if we've exceeded the timeout
+                        let now = Instant::now();
+                        if now.duration_since(last_pong) > ping_timeout {
+                            debug!("Client {} ping timeout", client_id);
+                            let timeout_msg = "ERROR :Ping timeout\r\n".as_bytes().to_vec();
+                            if tx.send(timeout_msg).is_err() {
+                                debug!("Failed to send timeout message - channel closed");
+                            }
+                            break;
+                        }
+
+                        // Send a new ping
+                        debug!("Server sending PING to client {}", client_id);
+                        let ping_msg = format!(":{} PING :{}\r\n", server_name, server_name);
+                        match tx.send(ping_msg.into_bytes()) {
+                            Ok(_) => debug!("Successfully queued PING message for client {}", client_id),
+                            Err(e) => {
+                                debug!("Failed to send PING message: {} - channel closed", e);
+                                break;
+                            }
+                        }
+                        
+                        last_ping = now;
+                    }
+                    
+                    Ok(_) = pong_rx.recv() => {
+                        debug!("Received PONG update for client {}", client_id);
+                        last_pong = Instant::now();
+                    }
+                }
+            }
+            debug!("Ping timer task exiting for client {}", client_id);
+        }));
     }
 
     pub async fn send_message(&self, message: &TS6Message) -> IrcResult<()> {
         let msg_string = message.to_string();
         debug!("Sending message to client {}: {:?}", self.id, msg_string);
         
-        let mut stream = self.stream.lock().await;
-        stream.write_all(msg_string.as_bytes()).await.map_err(|e| {
-            error!("Failed to send message to client {}: {}", self.id, e);
-            IrcError::Io(e)
-        })?;
-        stream.write_all(b"\r\n").await.map_err(|e| {
-            error!("Failed to send line ending to client {}: {}", self.id, e);
-            IrcError::Io(e)
-        })?;
-        stream.flush().await.map_err(|e| {
-            error!("Failed to flush stream for client {}: {}", self.id, e);
-            IrcError::Io(e)
+        let mut data = msg_string.into_bytes();
+        data.extend_from_slice(b"\r\n");
+        
+        // Use sendq for normal messages
+        self.sendq_tx.send(data).map_err(|_| {
+            let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Channel closed");
+            IrcError::Io(err)
         })?;
 
-        debug!("Successfully sent message to client {}", self.id);
+        debug!("Successfully queued message for client {}", self.id);
         Ok(())
     }
 
-    pub async fn handle_connection(&mut self) -> IrcResult<()> {
-        debug!("Starting connection handler for client {}", self.id);
-        loop {
-            let data = {
-                let mut stream = self.stream.lock().await;
-                let mut reader = BufReader::new(&mut *stream);
-                let mut buffer = [0u8; 512];
-                
-                match reader.read(&mut buffer).await {
-                    Ok(0) => return Ok(()),
-                    Ok(n) => String::from_utf8_lossy(&buffer[..n]).into_owned(),
-                    Err(e) => return Err(IrcError::Io(e)),
-                }
-            }; // stream lock is dropped here
-            
-            // Process messages outside the stream lock
-            for line in data.lines() {
-                if let Some(message) = parse_message(line) {
-                    if let Err(e) = self.handle_message(message).await {
-                        error!("Error handling message: {}", e);
-                    }
-                }
-            }
+    pub async fn write_raw(&self, data: &[u8]) -> IrcResult<()> {
+        let mut data = data.to_vec();
+        if !data.ends_with(b"\r\n") {
+            data.extend_from_slice(b"\r\n");
         }
-    }
-
-    async fn handle_message(&mut self, message: TS6Message) -> IrcResult<()> {
-        match message.command.as_str() {
-            "CAP" => self.handle_cap(message).await,
-            "PING" => {
-                let response = TS6Message::new(
-                    "PONG".to_string(),
-                    message.params.clone(),
-                );
-                self.send_message(&response).await
-            }
-            "PONG" => Ok(()),
-            "NICK" => self.handle_nick(message).await,
-            "USER" => self.handle_user(message).await,
-            cmd if !self.registered => {
-                warn!("Unregistered client {} sent command: {}", self.id, cmd);
-                Err(IrcError::Protocol("Not registered".into()))
-            }
-            "QUIT" => self.handle_quit(message).await,
-            "JOIN" => self.handle_join(message).await,
-            cmd => {
-                warn!("Unknown command from client {}: {}", self.id, cmd);
-                self.send_numeric(421, &[&message.command, "Unknown command"]).await
-            }
-        }
-    }
-
-    async fn handle_nick(&mut self, message: TS6Message) -> IrcResult<()> {
-        if message.params.is_empty() {
-            debug!("Client {} sent NICK with no parameters", self.id);
-            return Err(IrcError::Protocol("No nickname provided".into()));
-        }
-
-        let new_nick = &message.params[0];
-        debug!("Client {} attempting to set nickname to {}", self.id, new_nick);
-        // TODO: Add nickname validation
-        // TODO: Check for nickname collisions
         
-        self.nickname = Some(new_nick.clone());
-        debug!("Client {} nickname set to {}", self.id, new_nick);
+        // Use immediate channel for raw writes
+        self.tx.send(data).map_err(|_| {
+            let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Channel closed");
+            IrcError::Io(err)
+        })?;
+        Ok(())
+    }
 
-        if self.is_registered() {
-            // Send nickname change notification
-            let msg = TS6Message::with_source(
-                self.get_prefix(),
-                "NICK".to_string(),
-                vec![new_nick.clone()]
-            );
-            self.send_message(&msg).await?;
+    pub fn is_registered(&self) -> bool {
+        self.registered
+    }
+
+    pub fn get_mask(&self) -> String {
+        format!("{}!{}@{}", 
+            self.nickname.as_ref().unwrap_or(&"*".to_string()),
+            self.username.as_ref().unwrap_or(&"*".to_string()),
+            self.hostname
+        )
+    }
+
+    pub fn get_prefix(&self) -> String {
+        if let (Some(nick), Some(user)) = (self.nickname.as_ref(), self.username.as_ref()) {
+            format!("{}!{}@{}", nick, user, self.hostname)
         } else {
-            debug!("Client {} attempting registration after NICK", self.id);
-            self.try_register().await?;
+            // This should never happen for registered users, but just in case
+            format!("unknown@{}", self.hostname)
         }
-
-        Ok(())
     }
 
-    async fn handle_user(&mut self, message: TS6Message) -> IrcResult<()> {
-        debug!("Client {} USER command with params: {:?}", self.id, message.params);
-        if message.params.len() < 4 {
-            return Err(IrcError::Protocol("Invalid USER command".into()));
-        }
-
-        if self.username.is_some() {
-            return Err(IrcError::Protocol("Cannot change USER once registered".into()));
-        }
-
-        self.username = Some(message.params[0].clone());
-        self.realname = Some(message.params[3].clone());
-        debug!("Client {} set username={:?}, realname={:?}", 
-               self.id, self.username, self.realname);
-
-        debug!("Client {} attempting registration after USER", self.id);
-        self.try_register().await?;
-        Ok(())
+    pub async fn send_error(&self, msg: &str) -> IrcResult<()> {
+        let error_msg = format!("ERROR :{}\r\n", msg);
+        self.write_raw(error_msg.as_bytes()).await
     }
 
-    async fn handle_quit(&mut self, message: TS6Message) -> IrcResult<()> {
-        let quit_message = message.params.first()
-            .map(|s| s.as_str())
-            .unwrap_or("Client quit");
-
-        info!("Client {} quit: {}", self.id, quit_message);
-        
-        // Send quit message to other clients
-        let msg = TS6Message::with_source(
-            self.get_prefix(),
-            "QUIT".to_string(),
-            vec![quit_message.to_string()]
-        );
-        self.send_message(&msg).await?;
-        
-        Ok(())
-    }
-
-    async fn handle_cap(&mut self, message: TS6Message) -> IrcResult<()> {
-        if message.params.is_empty() {
-            return Err(IrcError::Protocol("Invalid CAP command".into()));
-        }
-
-        debug!("Handling CAP command: {:?}", message);
-
-        match message.params[0].to_uppercase().as_str() {
-            "LS" => {
-                self.cap_negotiating = true;
-                let caps: String = self.available_capabilities
-                    .iter()
-                    .map(|cap| cap.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                
-                debug!("Sending CAP LS response: {}", caps);
-                // For CAP LS 302, we need to send just the capabilities list
-                let msg = if message.params.get(1) == Some(&"302".to_string()) {
-                    TS6Message::new("CAP".to_string(), vec!["*".to_string(), "LS".to_string(), caps])
-                } else {
-                    TS6Message::new("CAP".to_string(), vec!["*".to_string(), "LS".to_string(), caps])
-                };
-                self.send_message(&msg).await?;
-            }
-            "REQ" => {
-                if message.params.len() < 2 {
-                    return Err(IrcError::Protocol("Invalid CAP REQ command".into()));
-                }
-
-                let requested_caps = message.params[1].clone();
-                debug!("Client requested capabilities: {}", requested_caps);
-
-                let requested_caps: Vec<_> = requested_caps
-                    .split_whitespace()
-                    .filter_map(Capability::from_str)
-                    .collect();
-
-                // Check if all requested capabilities are available
-                let all_available = requested_caps.iter()
-                    .all(|cap| self.available_capabilities.contains(cap));
-
-                if all_available {
-                    // Enable the capabilities
-                    for cap in requested_caps {
-                        self.enabled_capabilities.insert(cap);
-                    }
-
-                    let caps = message.params[1].clone();
-                    debug!("Acknowledging capabilities: {}", caps);
-                    let msg = TS6Message::new("CAP".to_string(), vec!["*".to_string(), "ACK".to_string(), caps]);
-                    self.send_message(&msg).await?;
-                } else {
-                    debug!("Rejecting capabilities: {}", message.params[1]);
-                    let msg = TS6Message::new("CAP".to_string(), vec!["*".to_string(), "NAK".to_string(), message.params[1].clone()]);
-                    self.send_message(&msg).await?;
-                }
-            }
-            "END" => {
-                debug!("Ending capability negotiation");
-                self.cap_negotiating = false;
-                // Don't try to register here - wait for NICK and USER
-            }
-            "LIST" => {
-                let caps: String = self.enabled_capabilities
-                    .iter()
-                    .map(|cap| cap.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                
-                debug!("Listing enabled capabilities: {}", caps);
-                let msg = TS6Message::new("CAP".to_string(), vec!["*".to_string(), "LIST".to_string(), caps]);
-                self.send_message(&msg).await?;
-            }
-            subcmd => {
-                warn!("Invalid CAP subcommand: {}", subcmd);
-                return Err(IrcError::Protocol("Invalid CAP subcommand".into()));
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn send_numeric(&self, numeric: u16, params: &[&str]) -> IrcResult<()> {
+    pub async fn send_numeric(&self, numeric: u16, params: &[&str]) -> IrcResult<()> {
         let numeric_str = format!("{:03}", numeric);
         let mut message_params = vec![];
         
@@ -301,174 +285,144 @@ impl Client {
         self.send_message(&message).await
     }
 
-    fn is_registered(&self) -> bool {
-        self.registered
+    pub fn get_username(&self) -> Option<&String> {
+        self.username.as_ref()
     }
 
-    async fn try_register(&mut self) -> IrcResult<()> {
-        debug!(
-            "Checking registration: nick={:?}, user={:?}, registered={}, cap_negotiating={}",
-            self.nickname, self.username, self.registered, self.cap_negotiating
-        );
-
-        if self.nickname.is_some() && self.username.is_some() && !self.registered && !self.cap_negotiating {
-            self.registered = true;
-            info!("Client {} registered as {}", self.id, self.nickname.as_ref().unwrap());
-            
-            // Send registration messages in the required order
-            // 001 RPL_WELCOME
-            self.send_numeric(001, &[&format!("Welcome to {} {}", 
-                self.server_name,
-                self.get_prefix()
-            )]).await?;
-
-            // 002 RPL_YOURHOST
-            self.send_numeric(002, &[&format!("Your host is {}, running ircd-rs v0.1.0",
-                self.server_name
-            )]).await?;
-
-            // 003 RPL_CREATED
-            self.send_numeric(003, &[&format!("This server was created {}",
-                chrono::Local::now().format("%Y-%m-%d")
-            )]).await?;
-
-            // 004 RPL_MYINFO
-            self.send_numeric(004, &[
-                &self.server_name,
-                "ircd-rs-0.1.0",  // version
-                "iowghraAsORTVSxNCWqBzvdHtGp", // user modes
-                "bkloveqjfI",     // channel modes
-                "bklov",          // channel modes that take parameters
-            ]).await?;
-
-            // 005 RPL_ISUPPORT
-            self.send_numeric(005, &[
-                "CHANTYPES=#",
-                "EXCEPTS",
-                "INVEX",
-                "CHANMODES=eIbq,k,flj,CFLMPQScgimnprstuz",
-                "CHANLIMIT=#:100",
-                "PREFIX=(ov)@+",
-                "MAXLIST=bqeI:100",
-                "MODES=4",
-                "NETWORK=ExampleNet",
-                "STATUSMSG=@+",
-                "CALLERID=g",
-                "CASEMAPPING=rfc1459",
-                ":are supported by this server"
-            ]).await?;
-
-            // Send MOTD after registration is complete
-            self.send_numeric(375, &["- Message of the day"]).await?;
-            self.send_numeric(372, &["- Welcome to IRCd-rs!"]).await?;
-            self.send_numeric(376, &["End of /MOTD command."]).await?;
-        }
-        Ok(())
+    pub fn get_nickname(&self) -> Option<&String> {
+        self.nickname.as_ref()
     }
 
-    fn get_prefix(&self) -> String {
-        if let Some(nick) = &self.nickname {
-            if let Some(user) = &self.username {
-                format!("{}!{}@{}", nick, user, self.hostname)
-            } else {
-                format!("{}!unknown@{}", nick, self.hostname)
-            }
-        } else {
-            format!("unknown@{}", self.hostname)
-        }
+    pub fn get_realname(&self) -> Option<&String> {
+        self.realname.as_ref()
     }
 
-    pub fn has_capability(&self, cap: &Capability) -> bool {
-        self.enabled_capabilities.contains(cap)
+    pub fn get_hostname(&self) -> &str {
+        &self.hostname
     }
 
-    async fn send_message_with_time(&self, message: &mut TS6Message) -> IrcResult<()> {
-        if self.has_capability(&Capability::ServerTime) {
-            let timestamp = Utc::now().format("@time=%Y-%m-%dT%H:%M:%S.%3fZ ");
-            message.tags.insert("time".to_string(), timestamp.to_string());
-        }
-        self.send_message(message).await
+    pub fn id(&self) -> u32 {
+        self.id
     }
 
-    async fn handle_join(&mut self, message: TS6Message) -> IrcResult<()> {
-        if message.params.is_empty() {
-            return Err(IrcError::Protocol("No channel specified".into()));
-        }
+    pub fn get_account(&self) -> Option<&String> {
+        self.account.as_ref()
+    }
 
-        let channel_name = &message.params[0];
-        // TODO: Add channel validation
+    pub fn get_ip(&self) -> IpAddr {
+        self.ip_addr
+    }
+
+    pub async fn cleanup(&mut self) {
+        debug!("Cleaning up client {}", self.id);
         
-        let mut response = TS6Message::with_source(
-            self.get_prefix(),
-            "JOIN".to_string(),
-            if self.has_capability(&Capability::ExtendedJoin) {
-                vec![
-                    channel_name.clone(),
-                    self.account.as_deref().unwrap_or("*").to_string(),
-                    self.realname.clone().unwrap_or_default(),
-                ]
-            } else {
-                vec![channel_name.clone()]
-            }
-        );
-
-        self.send_message_with_time(&mut response).await?;
-
-        // Send channel modes if we have multi-prefix capability
-        if self.has_capability(&Capability::MultiPrefix) {
-            // Example: Send all prefix modes for users
-            let mode_response = TS6Message::new(
-                "MODE".to_string(),
-                vec![channel_name.clone(), "+ov nick1 nick2".to_string()]
-            );
-            self.send_message(&mode_response).await?;
+        // Cancel the ping timer if it exists
+        if let Some(timer) = self.ping_timer.take() {
+            timer.abort();
         }
 
-        Ok(())
+        // Remove from all channels
+        if let Some(ref nick) = self.nickname {
+            let channels = self.server.get_client_channels(self.id).await;
+            for channel in channels {
+                let quit_msg = TS6Message::with_source(
+                    self.get_prefix(),
+                    "QUIT".to_string(),
+                    vec!["Connection closed".to_string()]
+                );
+                self.server.broadcast_to_channel(&channel, &quit_msg, Some(self.id)).await.ok();
+                self.server.remove_from_channel(&channel, self.id).await.ok();
+            }
+        }
+
+        // Clear any remaining queues
+        self.recvq.clear();
+
+        // Close the writer channel
+        drop(self.tx.clone());
+
+        debug!("Cleanup complete for client {}", self.id);
     }
 
-    async fn handle_names(&mut self, channel: &str, members: &[(String, Vec<char>)]) -> IrcResult<()> {
-        let mut prefixes = Vec::new();
-        for (nick, modes) in members {
-            let mut prefix = String::new();
-            if self.has_capability(&Capability::MultiPrefix) {
-                // With multi-prefix, show all prefix modes
-                for mode in modes {
-                    match mode {
-                        'o' => prefix.push('@'),
-                        'v' => prefix.push('+'),
-                        'h' => prefix.push('%'),
-                        'a' => prefix.push('&'),
-                        'q' => prefix.push('~'),
-                        _ => {}
+    pub async fn handle_connection_with_reader(&mut self, reader: OwnedReadHalf) -> IrcResult<()> {
+        let mut reader = BufReader::new(reader);
+        let mut buffer = String::new();
+        
+        loop {
+            buffer.clear();
+            match reader.read_line(&mut buffer).await {
+                Ok(0) => {
+                    debug!("Client {} closed connection", self.id);
+                    return Ok(());
+                }
+                Ok(_) => {
+                    let line = buffer.trim();
+                    if let Some(message) = parse_message(line) {
+                        match self.handle_message(message).await {
+                            Ok(_) => continue,
+                            Err(e) => {
+                                error!("Error handling message for client {}: {}", self.id, e);
+                                if matches!(e, IrcError::Protocol(_)) {
+                                    continue; // Continue on protocol errors
+                                }
+                                return Err(e); // Return on other errors
+                            }
+                        }
                     }
                 }
-            } else {
-                // Without multi-prefix, show only the highest prefix
-                if let Some(mode) = modes.first() {
-                    match mode {
-                        'q' => prefix.push('~'),
-                        'a' => prefix.push('&'),
-                        'o' => prefix.push('@'),
-                        'h' => prefix.push('%'),
-                        'v' => prefix.push('+'),
-                        _ => {}
+                Err(e) => {
+                    error!("Read error for client {}: {}", self.id, e);
+                    return Err(IrcError::Io(e));
+                }
+            }
+        }
+    }
+
+    pub async fn handle_message(&mut self, message: TS6Message) -> IrcResult<()> {
+        match message.command.as_str() {
+            // CAP must be handled first
+            "CAP" => self.handle_cap(message).await,
+            
+            // During CAP negotiation, only allow CAP and QUIT
+            cmd if self.cap_negotiating => {
+                match cmd {
+                    "QUIT" => self.handle_quit(message).await,
+                    _ => {
+                        warn!("Client {} sent {} during CAP negotiation", self.id, cmd);
+                        Err(IrcError::Protocol("Must complete capability negotiation first (CAP END)".into()))
                     }
                 }
             }
-            prefixes.push(format!("{}{}", prefix, nick));
+
+            // After CAP END, allow registration commands
+            "NICK" => self.handle_nick(message).await,
+            "USER" => self.handle_user(message).await,
+            "QUIT" => self.handle_quit(message).await,
+
+            // All other commands require completed registration
+            cmd if !self.registered => {
+                warn!("Unregistered client {} sent command: {}", self.id, cmd);
+                Err(IrcError::Protocol("Not registered".into()))
+            }
+
+            // Normal commands after registration
+            "PING" => self.handle_ping(message).await,
+            "PONG" => self.handle_pong(message).await,
+            "MODE" => self.handle_mode(message).await,
+            "WHOIS" => self.handle_whois(message).await,
+            "JOIN" => self.handle_join(message).await,
+            "PART" => self.handle_part(message).await,
+            "PRIVMSG" => self.handle_privmsg(message).await,
+            "NOTICE" => self.handle_notice(message).await,
+            "MOTD" => self.handle_motd(message).await,
+            "LUSERS" => self.handle_lusers(message).await,
+            "VERSION" => self.handle_version(message).await,
+            "ADMIN" => self.handle_admin(message).await,
+            "INFO" => self.handle_info(message).await,
+            cmd => {
+                warn!("Unknown command from client {}: {}", self.id, cmd);
+                self.send_numeric(421, &[&message.command, "Unknown command"]).await
+            }
         }
-
-        let mut response = TS6Message::new(
-            "353".to_string(),
-            vec![
-                self.nickname.clone().unwrap_or_else(|| "*".to_string()),
-                "=".to_string(),
-                channel.to_string(),
-                prefixes.join(" ")
-            ]
-        );
-
-        self.send_message_with_time(&mut response).await
     }
 } 
