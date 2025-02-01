@@ -1,0 +1,16 @@
+# IRCd-rs Example Configuration
+
+[server]
+name = "irc.example.con"
+description = "My IRC Server"
+sid = "001"                # Server ID for TS6 protocol
+bind_addr = "0.0.0.0"     # Address to bind to
+port = 6667               # Port to listen on
+
+[network]
+name = "ExampleNet"       # Network name
+
+[limits]
+max_clients = 1000       # Maximum number of clients
+max_channels = 500       # Maximum number of channels
+
