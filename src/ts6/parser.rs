@@ -2,8 +2,12 @@ use super::TS6Message;
 use std::collections::HashMap;
 use tracing::debug;
 
-pub fn parse_message(line: &str) -> Option<TS6Message> {
+pub fn parse_message(line: &str) -> Result<TS6Message, String> {
     debug!("Attempting to parse message: {:?}", line);
+    if line.is_empty() {
+        return Err("Empty message".to_string());
+    }
+
     let mut tags = HashMap::new();
     let mut rest = line;
 
@@ -11,8 +15,7 @@ pub fn parse_message(line: &str) -> Option<TS6Message> {
     if line.starts_with('@') {
         let parts: Vec<_> = line[1..].splitn(2, ' ').collect();
         if parts.len() != 2 {
-            debug!("Failed to parse message tags");
-            return None;
+            return Err("Failed to parse message tags".to_string());
         }
         
         for tag in parts[0].split(';') {
@@ -27,16 +30,19 @@ pub fn parse_message(line: &str) -> Option<TS6Message> {
     let mut parts = rest.splitn(2, ' ');
     
     let (source, rest) = if rest.starts_with(':') {
-        let source = parts.next()?[1..].to_string();
-        debug!("Found message source: {}", source);
-        (Some(source), parts.next()?)
+        let source = parts.next()
+            .ok_or("Missing source")?[1..].to_string();
+        let rest = parts.next()
+            .ok_or("Missing command after source")?;
+        (Some(source), rest)
     } else {
         (None, rest)
     };
 
     let mut parts = rest.splitn(2, ' ');
-    let command = parts.next()?.to_string();
-    debug!("Found command: {}", command);
+    let command = parts.next()
+        .ok_or("Missing command")?
+        .to_string();
     
     let params = if let Some(param_str) = parts.next() {
         parse_params(param_str)
@@ -44,9 +50,7 @@ pub fn parse_message(line: &str) -> Option<TS6Message> {
         Vec::new()
     };
 
-    debug!("Parsed message: command={}, params={:?}", command, params);
-
-    Some(TS6Message {
+    Ok(TS6Message {
         tags,
         source,
         command,

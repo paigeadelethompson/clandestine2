@@ -44,10 +44,10 @@ mod tests {
 
     async fn wait_for_server(addr: &SocketAddr) {
         for _ in 0..50 {  // Try for 5 seconds
-            if StdTcpStream::connect(addr).is_ok() {
+            if let Ok(_) = TcpStream::connect(addr).await {
                 return;
             }
-            sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         panic!("Server failed to start within timeout");
     }
@@ -167,5 +167,142 @@ mod tests {
         
         // Test K-line check
         assert!(server.check_access(&client).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_server_nickname_management() {
+        let port = 6904;
+        let server = Arc::new(Server::new(test_config(port)).await.unwrap());
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        
+        start_server(Arc::clone(&server), port).await;
+        wait_for_server(&addr).await;
+        
+        // Test nickname registration
+        server.register_nickname("testnick", 1).await.unwrap();
+        assert!(server.is_nickname_registered("testnick").await);
+        
+        // Test duplicate nickname
+        assert!(server.register_nickname("testnick", 2).await.is_err());
+        
+        // Test nickname release
+        server.release_nickname("testnick").await;
+        assert!(!server.is_nickname_registered("testnick").await);
+        
+        // Test registering released nickname
+        assert!(server.register_nickname("testnick", 2).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_server_channel_limits() {
+        let port = 6905;
+        let mut config = test_config(port);
+        config.limits.max_channels = 2;
+        let server = Arc::new(Server::new(config).await.unwrap());
+        
+        // Test channel creation within limits
+        let channel1 = server.get_or_create_channel("#test1").await;
+        let channel2 = server.get_or_create_channel("#test2").await;
+        assert!(channel1.read().await.name == "#test1");
+        assert!(channel2.read().await.name == "#test2");
+        
+        // Test channel limit enforcement
+        let channel3 = server.get_or_create_channel("#test3").await;
+        assert!(channel3.read().await.name == "#test3");
+        assert_eq!(server.get_channel_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_server_client_limits() {
+        let port = 6906;
+        let mut config = test_config(port);
+        config.limits.max_clients = 2;
+        let server = Arc::new(Server::new(config).await.unwrap());
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        
+        start_server(Arc::clone(&server), port).await;
+        wait_for_server(&addr).await;
+        
+        // Create test clients
+        let stream1 = TcpStream::connect(addr).await.unwrap();
+        let client1 = Arc::new(Mutex::new(Client::new(
+            stream1.into_split().1,
+            addr,
+            "test.server".to_string(),
+            Arc::clone(&server)
+        )));
+
+        let stream2 = TcpStream::connect(addr).await.unwrap();
+        let client2 = Arc::new(Mutex::new(Client::new(
+            stream2.into_split().1,
+            addr,
+            "test.server".to_string(),
+            Arc::clone(&server)
+        )));
+        
+        // Test adding clients within limit
+        server.add_client(Arc::clone(&client1)).await;
+        server.add_client(Arc::clone(&client2)).await;
+        assert_eq!(server.get_client_count().await, 2);
+        
+        // Test client limit enforcement
+        let stream3 = TcpStream::connect(addr).await.unwrap();
+        let client3 = Arc::new(Mutex::new(Client::new(
+            stream3.into_split().1,
+            addr,
+            "test.server".to_string(),
+            Arc::clone(&server)
+        )));
+        
+        server.add_client(Arc::clone(&client3)).await;
+        assert_eq!(server.get_client_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_server_kline_management() {
+        let port = 6907;
+        let server = Arc::new(Server::new(test_config(port)).await.unwrap());
+        
+        // Start server in background task
+        let server_clone = Arc::clone(&server);
+        tokio::spawn(async move {
+            server_clone.run().await.unwrap();
+        });
+
+        // Wait for server to start
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        wait_for_server(&addr).await;
+        
+        // Add K-line
+        let kline = KLine {
+            mask: "*!*@banned.com".to_string(),
+            reason: "Test ban".to_string(),
+            set_by: "admin".to_string(),
+            duration: 0,
+            set_time: Utc::now(),
+        };
+        server.add_kline(kline).await.unwrap();
+        
+        // Try to connect - should fail due to K-line
+        let stream = match TcpStream::connect(&addr).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                panic!("Failed to connect to test server: {}", e);
+            }
+        };
+
+        let mut client = Client::new(
+            stream.into_split().1,
+            addr,
+            "test.server".to_string(),
+            Arc::clone(&server)
+        );
+        client.set_hostname("banned.com".to_string());
+        
+        assert!(server.check_access(&client).await.is_err());
+        
+        // Remove K-line and try again
+        server.remove_kline("*!*@banned.com".to_string()).await.unwrap();
+        assert!(server.check_access(&client).await.is_ok());
     }
 } 

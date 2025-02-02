@@ -132,4 +132,101 @@ mod tests {
             assert!(!client_lock.has_capability(&Capability::ExtendedJoin));
         }
     }
+
+    #[tokio::test]
+    async fn test_client_registration() {
+        let server = Arc::new(Server::new(test_config(6920)).await.unwrap());
+        let addr: SocketAddr = format!("127.0.0.1:{}", 6920).parse().unwrap();
+        
+        start_server(Arc::clone(&server), 6920).await;
+        wait_for_server(&addr).await;
+        
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let client = Arc::new(Mutex::new(Client::new(
+            stream.into_split().1,
+            addr,
+            "test.server".to_string(),
+            server
+        )));
+
+        // Test NICK command
+        {
+            let mut client_lock = client.lock().await;
+            let nick_msg = TS6Message::new("NICK".to_string(), vec!["testnick".to_string()]);
+            client_lock.handle_nick(nick_msg).await.unwrap();
+            assert_eq!(client_lock.get_nickname().unwrap(), "testnick");
+        }
+
+        // Test USER command
+        {
+            let mut client_lock = client.lock().await;
+            let user_msg = TS6Message::new(
+                "USER".to_string(), 
+                vec!["testuser".to_string(), "0".to_string(), "*".to_string(), "Real Name".to_string()]
+            );
+            client_lock.handle_user(user_msg).await.unwrap();
+            assert_eq!(client_lock.username.as_ref().unwrap(), "testuser");
+            assert_eq!(client_lock.realname.as_ref().unwrap(), "Real Name");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_client_modes() {
+        let server = Arc::new(Server::new(test_config(6921)).await.unwrap());
+        let addr: SocketAddr = format!("127.0.0.1:{}", 6921).parse().unwrap();
+        
+        start_server(Arc::clone(&server), 6921).await;
+        wait_for_server(&addr).await;
+        
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let client = Arc::new(Mutex::new(Client::new(
+            stream.into_split().1,
+            addr,
+            "test.server".to_string(),
+            server
+        )));
+
+        {
+            let mut client_lock = client.lock().await;
+            
+            // Test setting user modes
+            let mode_msg = TS6Message::new("MODE".to_string(), vec!["testnick".to_string(), "+i".to_string()]);
+            client_lock.handle_user_mode(mode_msg).await.unwrap();
+            assert!(client_lock.modes.contains(&'i'));
+
+            // Test removing user modes
+            let mode_msg = TS6Message::new("MODE".to_string(), vec!["testnick".to_string(), "-i".to_string()]);
+            client_lock.handle_user_mode(mode_msg).await.unwrap();
+            assert!(!client_lock.modes.contains(&'i'));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_client_ping_pong() {
+        let server = Arc::new(Server::new(test_config(6922)).await.unwrap());
+        let addr: SocketAddr = format!("127.0.0.1:{}", 6922).parse().unwrap();
+        
+        start_server(Arc::clone(&server), 6922).await;
+        wait_for_server(&addr).await;
+        
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let client = Arc::new(Mutex::new(Client::new(
+            stream.into_split().1,
+            addr,
+            "test.server".to_string(),
+            server
+        )));
+
+        {
+            let mut client_lock = client.lock().await;
+            
+            // Test PING handling
+            let ping_msg = TS6Message::new("PING".to_string(), vec!["server1".to_string()]);
+            client_lock.handle_ping(ping_msg).await.unwrap();
+            
+            // Test PONG handling
+            let pong_msg = TS6Message::new("PONG".to_string(), vec!["server1".to_string(), "server2".to_string()]);
+            client_lock.handle_pong(pong_msg).await.unwrap();
+        }
+    }
 } 

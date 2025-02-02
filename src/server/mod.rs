@@ -118,10 +118,14 @@ impl Server {
     }
 
     pub async fn add_kline(&self, kline: KLine) -> Result<(), Box<dyn std::error::Error>> {
-        // Add to memory
         let mut access = self.config.access.clone();
-        access.klines.push(kline.clone());
-        
+        access.klines.push(kline);
+        Ok(())
+    }
+
+    pub async fn remove_kline(&self, mask: String) -> Result<(), Box<dyn std::error::Error>> {
+        let mut access = self.config.access.clone();
+        access.klines.retain(|k| k.mask != mask);
         Ok(())
     }
 
@@ -518,29 +522,33 @@ impl Server {
         resp_rx.recv().expect("Server task died")
     }
 
-    pub async fn link_server(&self, config: ServerLinkConfig) -> IrcResult<()> {
+    pub async fn connect_to_server(&self, config: &ServerLinkConfig) -> IrcResult<()> {
+        debug!("Connecting to server {} at {}", config.name, config.address);
+        
+        // Connect to remote server
+        let stream = TcpStream::connect(&config.address).await.map_err(|e| {
+            error!("Failed to connect to {}: {}", config.address, e);
+            IrcError::Io(e)
+        })?;
+
+        // Create server link with the stream
         let server_link = ServerLink::new(
+            stream,
             config.name.clone(),
-            config.sid,
-            config.description,
-            config.password,
+            config.sid.clone(),
+            config.description.clone(),
+            config.password.clone(),
         );
 
-        // Connect to remote server
-        let stream = TcpStream::connect(&config.address).await?;
-        
+        // Store server link
         let server_link = Arc::new(Mutex::new(server_link));
-        
-        {
-            let mut servers = self.linked_servers.write().await;
-            servers.insert(config.name, Arc::clone(&server_link));
-        }
+        self.linked_servers.write().await.insert(config.name.clone(), Arc::clone(&server_link));
 
-        // Handle connection in separate task
+        // Spawn server link handler - no need to pass stream since it's stored in ServerLink
         let server_link_clone = Arc::clone(&server_link);
         tokio::spawn(async move {
-            if let Err(e) = server_link_clone.lock().await.handle_connection(stream).await {
-                warn!("Server link error: {}", e);
+            if let Err(e) = server_link_clone.lock().await.handle_connection().await {
+                error!("Server link error: {}", e);
             }
         });
 
@@ -658,6 +666,22 @@ impl Server {
         info!("Server {} quit: {}", server, reason);
         // TODO: Remove server and its users from network
         Ok(())
+    }
+
+    pub async fn is_nickname_registered(&self, nickname: &str) -> bool {
+        self.nickname_map.read().await.contains_key(nickname)
+    }
+
+    pub async fn release_nickname(&self, nickname: &str) {
+        self.nickname_map.write().await.remove(nickname);
+    }
+
+    pub async fn get_channel_count(&self) -> usize {
+        self.channels.read().await.len()
+    }
+
+    pub async fn get_client_count(&self) -> usize {
+        self.clients.read().await.len()
     }
 }
 

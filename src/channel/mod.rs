@@ -17,6 +17,8 @@ pub struct Channel {
     mode_params: HashMap<char, String>, // For modes that take parameters like +k (key)
     created_at: u64,
     bans: Vec<Ban>,
+    operators: HashSet<u32>,
+    voices: HashSet<u32>,
 }
 
 #[derive(Clone)]
@@ -56,6 +58,8 @@ impl Channel {
             mode_params: HashMap::new(),
             created_at: crate::ts6::generate_ts(),
             bans: Vec::new(),
+            operators: HashSet::new(),
+            voices: HashSet::new(),
         };
 
         // Set default modes +nt
@@ -153,6 +157,38 @@ impl Channel {
             }
             None => self.modes.contains(&mode)
         }
+    }
+
+    pub fn has_member(&self, id: u32) -> bool {
+        self.members.contains(&id)
+    }
+
+    pub fn is_operator(&self, id: u32) -> bool {
+        self.operators.contains(&id)
+    }
+
+    pub fn set_operator(&mut self, id: u32, value: bool) {
+        if value {
+            self.operators.insert(id);
+        } else {
+            self.operators.remove(&id);
+        }
+    }
+
+    pub fn is_voiced(&self, id: u32) -> bool {
+        self.voices.contains(&id)
+    }
+
+    pub fn set_voice(&mut self, id: u32, value: bool) {
+        if value {
+            self.voices.insert(id);
+        } else {
+            self.voices.remove(&id);
+        }
+    }
+
+    pub fn is_banned(&self, mask: &str) -> bool {
+        self.bans.iter().any(|ban| ban.mask == mask)
     }
 }
 

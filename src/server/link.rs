@@ -1,8 +1,8 @@
 use crate::error::{IrcError, IrcResult};
 use crate::ts6::TS6Message;
 use crate::ts6::parser::parse_message;
-use tokio::net::TcpStream;
-use tokio::io::{BufReader, AsyncBufReadExt, AsyncWriteExt, split};
+use tokio::net::{TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}};
+use tokio::io::{BufReader, AsyncBufReadExt, AsyncWriteExt};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 use std::io;
@@ -14,12 +14,13 @@ pub struct ServerLink {
     password: String,
     incoming: bool,
     capabilities: Vec<String>,
-    stream: Option<TcpStream>,
-    writer: Option<tokio::io::WriteHalf<TcpStream>>,
+    reader: BufReader<OwnedReadHalf>,
+    writer: OwnedWriteHalf,
 }
 
 impl ServerLink {
-    pub fn new(name: String, sid: String, description: String, password: String) -> Self {
+    pub fn new(stream: TcpStream, name: String, sid: String, description: String, password: String) -> Self {
+        let (read, write) = stream.into_split();
         Self {
             name,
             sid,
@@ -33,41 +34,28 @@ impl ServerLink {
                 "SAVE".to_string(),   // SAVE nickname
                 "SERVICES".to_string(), // Services support
             ],
-            stream: None,
-            writer: None,
+            reader: BufReader::new(read),
+            writer: write,
         }
     }
 
-    pub async fn handle_connection(&mut self, stream: TcpStream) -> IrcResult<()> {
-        // Take ownership of the stream directly
-        let (reader, writer) = split(stream);
-        self.writer = Some(writer);
-
-        // Initial handshake
-        self.send_pass().await?;
-        self.send_capab().await?;
-        self.send_server().await?;
-        
-        // Start burst
-        self.send_burst().await?;
-        
-        // Handle incoming messages
-        let mut buf_reader = BufReader::new(reader);
-        let mut line = String::new();
-
-        while buf_reader.read_line(&mut line).await? > 0 {
-            let msg = match parse_message(&line) {
-                Some(msg) => msg,
-                None => {
-                    line.clear();
+    pub async fn handle_connection(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            let mut line = String::new();
+            if self.reader.read_line(&mut line).await? == 0 {
+                break; // EOF
+            }
+            
+            match parse_message(&line) {
+                Ok(msg) => {
+                    self.handle_message(msg).await?;
+                }
+                Err(e) => {
+                    warn!("Failed to parse message: {}", e);
                     continue;
                 }
-            };
-
-            self.handle_message(msg).await?;
-            line.clear();
+            }
         }
-
         Ok(())
     }
 
@@ -117,14 +105,10 @@ impl ServerLink {
     }
 
     async fn send_message(&mut self, message: &TS6Message) -> IrcResult<()> {
-        if let Some(writer) = &mut self.writer {
-            let msg = format!("{}\r\n", message.to_string());
-            writer.write_all(msg.as_bytes()).await?;
-            writer.flush().await?;
-            Ok(())
-        } else {
-            Err(IrcError::Protocol("Not connected".into()))
-        }
+        let msg = format!("{}\r\n", message.to_string());
+        self.writer.write_all(msg.as_bytes()).await?;
+        self.writer.flush().await?;
+        Ok(())
     }
 
     async fn send_users_burst(&mut self) -> IrcResult<()> {

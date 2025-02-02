@@ -363,38 +363,24 @@ impl Client {
         debug!("Cleanup complete for client {}", self.id);
     }
 
-    pub async fn handle_connection_with_reader(&mut self, reader: OwnedReadHalf) -> IrcResult<()> {
-        let mut reader = BufReader::new(reader);
-        let mut buffer = String::new();
+    pub async fn handle_connection_with_reader(&mut self, mut reader: OwnedReadHalf) -> IrcResult<()> {
+        let mut lines = BufReader::new(reader).lines();
         
-        loop {
-            buffer.clear();
-            match reader.read_line(&mut buffer).await {
-                Ok(0) => {
-                    debug!("Client {} closed connection", self.id);
-                    return Ok(());
-                }
-                Ok(_) => {
-                    let line = buffer.trim();
-                    if let Some(message) = parse_message(line) {
-                        match self.handle_message(message).await {
-                            Ok(_) => continue,
-                            Err(e) => {
-                                error!("Error handling message for client {}: {}", self.id, e);
-                                if matches!(e, IrcError::Protocol(_)) {
-                                    continue; // Continue on protocol errors
-                                }
-                                return Err(e); // Return on other errors
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Read error for client {}: {}", self.id, e);
-                    return Err(IrcError::Io(e));
-                }
+        while let Some(line) = lines.next_line().await? {
+            debug!("Received line from client {}: {}", self.id, line);
+            
+            // Parse the message - add & to borrow the line
+            if let Ok(message) = parse_message(&line) {
+                // Process the message
+                self.handle_message(message).await?;
+            } else {
+                warn!("Failed to parse message from client {}: {}", self.id, line);
+                // Optionally send an error to the client
+                self.send_numeric(421, &["Unknown command"]).await?;
             }
         }
+        
+        Ok(())
     }
 
     pub async fn handle_message(&mut self, message: TS6Message) -> IrcResult<()> {
