@@ -753,4 +753,8 @@ async fn server_task(rx: mpsc::Receiver<ServerMessage>) {
             }
         }
     }
-} 
+}
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests; 

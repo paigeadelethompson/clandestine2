@@ -168,4 +168,8 @@ impl Default for ChannelModes {
             limit: None,
         }
     }
-} 
+}
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests; 

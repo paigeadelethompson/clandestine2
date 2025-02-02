@@ -75,6 +75,20 @@ pub struct AccessConfig {
     pub alines: Vec<ALine>,
 }
 
+impl Default for AccessConfig {
+    fn default() -> Self {
+        Self {
+            klines: Vec::new(),
+            dlines: Vec::new(),
+            glines: Vec::new(),
+            ilines: Vec::new(),
+            olines: Vec::new(),
+            ulines: Vec::new(),
+            alines: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct KLine {
     pub mask: String,           // nick!user@host mask

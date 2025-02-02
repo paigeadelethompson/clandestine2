@@ -457,4 +457,19 @@ impl Client {
             }
         }
     }
-} 
+
+    pub fn set_nickname(&mut self, nickname: String) -> IrcResult<()> {
+        debug!("Setting nickname for client {} to {}", self.id, nickname);
+        self.nickname = Some(nickname);
+        Ok(())
+    }
+
+    pub fn set_hostname(&mut self, hostname: String) {
+        debug!("Setting hostname for client {} to {}", self.id, hostname);
+        self.hostname = hostname;
+    }
+}
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests; 
