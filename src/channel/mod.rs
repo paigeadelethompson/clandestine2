@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::client::Client;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct Channel {
@@ -12,7 +13,8 @@ pub struct Channel {
     topic_setter: Option<String>,
     topic_time: DateTime<Utc>,
     members: HashSet<u32>, // ClientIds
-    pub(crate) modes: ChannelModes,
+    pub(crate) modes: HashSet<char>,  // Channel modes like +n, +t, etc
+    mode_params: HashMap<char, String>, // For modes that take parameters like +k (key)
     created_at: u64,
     bans: Vec<Ban>,
 }
@@ -44,16 +46,23 @@ pub struct Ban {
 impl Channel {
     pub fn new(name: String) -> Self {
         debug!("Creating new channel: {}", name);
-        Self {
+        let mut channel = Self {
             name,
             topic: None,
             topic_setter: None,
             topic_time: Utc::now(),
             members: HashSet::new(),
-            modes: ChannelModes::default(),
+            modes: HashSet::new(),
+            mode_params: HashMap::new(),
             created_at: crate::ts6::generate_ts(),
             bans: Vec::new(),
-        }
+        };
+
+        // Set default modes +nt
+        channel.set_mode('n', None, true);
+        channel.set_mode('t', None, true);
+
+        channel
     }
 
     pub async fn broadcast_message(&self, message: &str, exclude_client: Option<u32>) {
@@ -76,29 +85,24 @@ impl Channel {
         &self.members
     }
 
-    pub fn get_modes_string(&self) -> String {
-        let mut modes = String::from("+");
-        if self.modes.invite_only { modes.push('i'); }
-        if self.modes.moderated { modes.push('m'); }
-        if self.modes.no_external_messages { modes.push('n'); }
-        if self.modes.secret { modes.push('s'); }
-        if self.modes.topic_protection { modes.push('t'); }
-        
-        let mut params = Vec::new();
-        if let Some(limit) = self.modes.limit {
-            modes.push('l');
-            params.push(limit.to_string());
-        }
-        if let Some(ref key) = self.modes.key {
-            modes.push('k');
-            params.push(key.clone());
-        }
-
-        if !params.is_empty() {
-            modes.push(' ');
-            modes.push_str(&params.join(" "));
+    pub fn get_modes(&self) -> String {
+        let mut modes = String::new();
+        for mode in &self.modes {
+            modes.push(*mode);
         }
         modes
+    }
+
+    pub fn set_mode(&mut self, mode: char, param: Option<String>, adding: bool) {
+        if adding {
+            self.modes.insert(mode);
+            if let Some(param) = param {
+                self.mode_params.insert(mode, param);
+            }
+        } else {
+            self.modes.remove(&mode);
+            self.mode_params.remove(&mode);
+        }
     }
 
     pub fn get_bans(&self) -> &[Ban] {
@@ -136,6 +140,19 @@ impl Channel {
 
     pub fn get_topic_details(&self) -> (Option<String>, Option<String>, DateTime<Utc>) {
         (self.topic.clone(), self.topic_setter.clone(), self.topic_time)
+    }
+
+    pub fn has_mode(&self, mode: char, target: Option<&str>) -> bool {
+        match target {
+            Some(nick) => {
+                if let Some(param) = self.mode_params.get(&mode) {
+                    param == nick
+                } else {
+                    false
+                }
+            }
+            None => self.modes.contains(&mode)
+        }
     }
 }
 

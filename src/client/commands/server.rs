@@ -11,13 +11,14 @@ impl Client {
     pub(crate) async fn handle_ping(&mut self, message: TS6Message) -> IrcResult<()> {
         debug!("Received PING from client {}", self.id);
         
-        let param = message.params.first()
+        // Get the cookie parameter
+        let cookie = message.params.first()
             .ok_or_else(|| IrcError::Protocol("No ping parameter".into()))?;
             
-        debug!("Sending PONG response to client {} with param: {}", self.id, param);
+        debug!("Sending PONG response to client {} with cookie: {}", self.id, cookie);
         
-        // Send raw PONG response - use exact format client expects
-        let pong = format!(":{} PONG {} :{}\r\n", self.server_name, self.server_name, param);
+        // Send PONG response with the same cookie value
+        let pong = format!(":{} PONG :{}\r\n", self.server_name, cookie);
         self.write_raw(pong.as_bytes()).await
     }
 

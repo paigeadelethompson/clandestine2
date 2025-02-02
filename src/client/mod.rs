@@ -423,13 +423,26 @@ impl Client {
                 debug!("Received JOIN command with params: {:?}", message.params);
                 self.handle_join(message).await
             },
+            "PART" => {
+                debug!("Received PART command with params: {:?}", message.params);
+                self.handle_part(message).await
+            },
             "WHOIS" => {
                 debug!("Received WHOIS command with params: {:?}", message.params);
                 self.handle_whois(message).await
             },
             "PING" => self.handle_ping(message).await,
             "PONG" => self.handle_pong(message).await,
-            "MODE" => self.handle_mode(message).await,
+            "MODE" => {
+                let target = message.params.get(0).ok_or_else(|| 
+                    IrcError::Protocol("No mode target".into()))?;
+                
+                if target.starts_with('#') {
+                    self.handle_channel_mode(message).await
+                } else {
+                    self.handle_user_mode(message).await
+                }
+            },
             "PRIVMSG" => self.handle_privmsg(message).await,
             "NOTICE" => self.handle_notice(message).await,
             "MOTD" => self.handle_motd(message).await,
@@ -437,6 +450,7 @@ impl Client {
             "VERSION" => self.handle_version(message).await,
             "ADMIN" => self.handle_admin(message).await,
             "INFO" => self.handle_info(message).await,
+            "WHO" => self.handle_who(message).await,
             cmd => {
                 warn!("Unknown command from client {}: {}", self.id, cmd);
                 self.send_numeric(421, &[&message.command, "Unknown command"]).await

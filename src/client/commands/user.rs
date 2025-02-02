@@ -66,7 +66,7 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) async fn handle_mode(&mut self, message: TS6Message) -> IrcResult<()> {
+    pub(crate) async fn handle_user_mode(&mut self, message: TS6Message) -> IrcResult<()> {
         if message.params.is_empty() {
             return Err(IrcError::Protocol("Not enough parameters".into()));
         }

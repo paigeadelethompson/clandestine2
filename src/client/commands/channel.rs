@@ -16,11 +16,29 @@ impl Client {
         {
             let channel = self.server.get_or_create_channel(channel_name).await;
             let mut channel = channel.write().await;
+            
+            // Check if this is the first user (before adding the new member)
+            let is_first = channel.get_members().is_empty();
+            
             channel.add_member(self.id);
             
             // Send JOIN confirmation to all channel members (including the joining client)
             let join_msg = format!(":{} JOIN {}\r\n", self.get_prefix(), channel_name);
             self.write_raw(join_msg.as_bytes()).await?;
+            
+            // If this is the first user, give them channel operator status
+            if is_first {
+                // Set the channel mode
+                channel.set_mode('o', Some(self.get_nickname().unwrap().to_string()), true);
+                
+                // Send MODE message to notify the client
+                let mode_msg = format!(":{} MODE {} +o {}\r\n", 
+                    self.server_name,
+                    channel_name,
+                    self.get_nickname().unwrap()
+                );
+                self.write_raw(mode_msg.as_bytes()).await?;
+            }
             
             // Send topic or RPL_NOTOPIC
             if let Some(topic) = channel.get_topic() {
@@ -39,8 +57,15 @@ impl Client {
         let channel = channel.read().await;
         let member_ids = channel.get_members();
         
-        // Start of NAMES list
-        self.send_numeric(353, &["=", channel_name, &self.get_nickname().unwrap()]).await?;
+        // Start of NAMES list with @ prefix for channel operator
+        let nick = self.get_nickname().unwrap();
+        let names_list = if channel.has_mode('o', Some(&nick)) {
+            format!("@{}", nick)
+        } else {
+            nick.to_string()
+        };
+        
+        self.send_numeric(353, &["=", channel_name, &names_list]).await?;
         
         // End of NAMES list
         self.send_numeric(366, &[channel_name, "End of /NAMES list"]).await?;
@@ -50,7 +75,7 @@ impl Client {
 
     pub(crate) async fn handle_part(&mut self, message: TS6Message) -> IrcResult<()> {
         if message.params.is_empty() {
-            return Err(IrcError::Protocol("No channel specified".into()));
+            return Err(IrcError::Protocol("No channel given".into()));
         }
 
         let channel_name = &message.params[0];
@@ -58,25 +83,26 @@ impl Client {
             .map(|s| s.as_str())
             .unwrap_or("Leaving");
 
-        if let Some(channel) = self.server.get_channel(channel_name).await {
-            let channel = channel.read().await;
-            if !channel.get_members().contains(&self.id) {
-                return Err(IrcError::Protocol("Not on channel".into()));
-            }
+        debug!("Client {} attempting to part channel {}", self.id, channel_name);
 
-            // Broadcast PART to channel
-            let part_msg = TS6Message::with_source(
-                self.get_prefix(),
-                "PART".to_string(),
-                vec![channel_name.to_string(), part_message.to_string()]
-            );
-            self.server.broadcast_to_channel(channel_name, &part_msg, None).await?;
-
-            // Remove from channel
-            self.server.remove_from_channel(channel_name, self.id).await?;
-        } else {
-            return Err(IrcError::Protocol("No such channel".into()));
+        // Check if client is in the channel
+        if !self.server.check_channel_membership(channel_name, self.id).await {
+            return Err(IrcError::Protocol("Not on channel".into()));
         }
+
+        // Send PART message to channel
+        let part_msg = TS6Message::with_source(
+            self.get_prefix(),
+            "PART".to_string(),
+            vec![channel_name.to_string(), part_message.to_string()]
+        );
+        self.server.broadcast_to_channel(channel_name, &part_msg, Some(self.id)).await?;
+
+        // Remove client from channel
+        self.server.remove_from_channel(channel_name, self.id).await?;
+
+        // Send PART message to parting client
+        self.send_message(&part_msg).await?;
 
         Ok(())
     }
@@ -141,5 +167,90 @@ impl Client {
         }
         self.send_numeric(366, &[channel, "End of /NAMES list"]).await?;
         Ok(())
+    }
+
+    pub(crate) async fn handle_channel_mode(&mut self, message: TS6Message) -> IrcResult<()> {
+        if message.params.is_empty() {
+            return Err(IrcError::Protocol("Not enough parameters".into()));
+        }
+
+        let target = &message.params[0];
+        
+        // Channel modes
+        if target.starts_with('#') {
+            let channel = self.server.get_channel(target).await
+                .ok_or_else(|| IrcError::Protocol("No such channel".into()))?;
+            
+            if message.params.len() == 1 {
+                // Query channel modes
+                let channel = channel.read().await;
+                let modes = channel.get_modes();
+                self.send_numeric(324, &[target, &format!("+{}", modes)]).await?;
+                return Ok(());
+            }
+
+            let modes = &message.params[1];
+            let mut mode_params = message.params.iter().skip(2);
+            let mut adding = true;
+            let mut changes = Vec::new();
+
+            let mut channel = channel.write().await;
+            
+            for c in modes.chars() {
+                match c {
+                    '+' => adding = true,
+                    '-' => adding = false,
+                    'n' | 't' | 'm' | 'i' | 's' => {
+                        channel.set_mode(c, None, adding);
+                        changes.push((c, None, adding));
+                    }
+                    'k' => {
+                        if adding {
+                            if let Some(key) = mode_params.next() {
+                                channel.set_mode(c, Some(key.to_string()), true);
+                                changes.push((c, Some(key), true));
+                            }
+                        } else {
+                            channel.set_mode(c, None, false);
+                            changes.push((c, None, false));
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+
+            // Broadcast mode changes
+            if !changes.is_empty() {
+                let mut mode_str = String::new();
+                let mut params = Vec::new();
+                let mut adding = true;
+
+                for (mode, param, is_adding) in changes {
+                    if is_adding != adding {
+                        adding = is_adding;
+                        mode_str.push(if adding { '+' } else { '-' });
+                    }
+                    mode_str.push(mode);
+                    if let Some(param) = param {
+                        params.push(param.to_string());
+                    }
+                }
+
+                let mode_msg = TS6Message::with_source(
+                    self.get_prefix(),
+                    "MODE".to_string(),
+                    vec![target.to_string(), mode_str]
+                        .into_iter()
+                        .chain(params)
+                        .collect()
+                );
+                self.server.broadcast_to_channel(target, &mode_msg, None).await?;
+            }
+
+            Ok(())
+        } else {
+            // User modes handled elsewhere
+            self.handle_user_mode(message).await
+        }
     }
 } 

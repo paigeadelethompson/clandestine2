@@ -1,6 +1,8 @@
+pub mod link;
+
 use crate::database::Database;
 use crate::channel::Channel;
-use crate::config::{ServerConfig, KLine, DLine, GLine, ILine};
+use crate::config::{ServerConfig, KLine, DLine, GLine, ILine, ServerLinkConfig};
 use crate::error::{IrcError, IrcResult};
 use crate::client::Client;
 use crate::ts6::TS6Message;
@@ -15,6 +17,7 @@ use chrono::{DateTime, Utc};
 use regex;
 use std::time::Duration;
 use std::sync::mpsc::{self, Sender, Receiver};
+use crate::server::link::ServerLink;
 
 pub struct Server {
     pub(crate) config: Arc<ServerConfig>,
@@ -26,6 +29,7 @@ pub struct Server {
     registration_timeouts: Arc<RwLock<HashMap<ClientId, tokio::time::Instant>>>,
     nickname_map: Arc<RwLock<HashMap<String, ClientId>>>,
     tx: mpsc::Sender<ServerMessage>,
+    linked_servers: Arc<RwLock<HashMap<String, Arc<Mutex<ServerLink>>>>>,
 }
 
 type ClientId = u32;
@@ -85,6 +89,7 @@ impl Server {
             registration_timeouts: Arc::new(RwLock::new(HashMap::new())),
             nickname_map: Arc::new(RwLock::new(HashMap::new())),
             tx,
+            linked_servers: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Load persisted lines if database is configured
@@ -512,6 +517,148 @@ impl Server {
 
         resp_rx.recv().expect("Server task died")
     }
+
+    pub async fn link_server(&self, config: ServerLinkConfig) -> IrcResult<()> {
+        let server_link = ServerLink::new(
+            config.name.clone(),
+            config.sid,
+            config.description,
+            config.password,
+        );
+
+        // Connect to remote server
+        let stream = TcpStream::connect(&config.address).await?;
+        
+        let server_link = Arc::new(Mutex::new(server_link));
+        
+        {
+            let mut servers = self.linked_servers.write().await;
+            servers.insert(config.name, Arc::clone(&server_link));
+        }
+
+        // Handle connection in separate task
+        let server_link_clone = Arc::clone(&server_link);
+        tokio::spawn(async move {
+            if let Err(e) = server_link_clone.lock().await.handle_connection(stream).await {
+                warn!("Server link error: {}", e);
+            }
+        });
+
+        Ok(())
+    }
+
+    // Handle incoming server messages
+    pub(crate) async fn handle_server_message(&self, msg: TS6Message) -> IrcResult<()> {
+        match msg.command.as_str() {
+            "PASS" => self.handle_server_pass(msg).await,
+            "CAPAB" => self.handle_server_capab(msg).await,
+            "SERVER" => self.handle_server_intro(msg).await,
+            "SJOIN" => self.handle_server_join(msg).await,
+            "SID" => self.handle_server_sid(msg).await,
+            "PING" => self.handle_server_ping(msg).await,
+            "PONG" => self.handle_server_pong(msg).await,
+            "SQUIT" => self.handle_server_quit(msg).await,
+            _ => Ok(()),
+        }
+    }
+
+    async fn handle_server_pass(&self, msg: TS6Message) -> IrcResult<()> {
+        // PASS password TS ts sid
+        if msg.params.len() < 4 {
+            return Err(IrcError::Protocol("Invalid PASS parameters".into()));
+        }
+
+        let password = &msg.params[0];
+        let ts_version = &msg.params[2];
+        let sid = &msg.params[3];
+
+        // Verify TS version
+        if ts_version != "6" {
+            return Err(IrcError::Protocol("Unsupported TS version".into()));
+        }
+
+        // TODO: Verify password and SID
+        Ok(())
+    }
+
+    async fn handle_server_capab(&self, msg: TS6Message) -> IrcResult<()> {
+        // CAPAB capabilities...
+        if msg.params.is_empty() {
+            return Err(IrcError::Protocol("No capabilities specified".into()));
+        }
+
+        // TODO: Process capabilities
+        Ok(())
+    }
+
+    async fn handle_server_intro(&self, msg: TS6Message) -> IrcResult<()> {
+        // SERVER name hopcount description
+        if msg.params.len() < 3 {
+            return Err(IrcError::Protocol("Invalid SERVER parameters".into()));
+        }
+
+        let name = &msg.params[0];
+        let description = &msg.params[2];
+
+        // TODO: Add server to network topology
+        info!("Server {} introduced: {}", name, description);
+        Ok(())
+    }
+
+    async fn handle_server_join(&self, msg: TS6Message) -> IrcResult<()> {
+        // SJOIN timestamp channel modes members
+        if msg.params.len() < 4 {
+            return Err(IrcError::Protocol("Invalid SJOIN parameters".into()));
+        }
+
+        // TODO: Process channel join with TS
+        Ok(())
+    }
+
+    async fn handle_server_sid(&self, msg: TS6Message) -> IrcResult<()> {
+        // SID name hopcount sid description
+        if msg.params.len() < 4 {
+            return Err(IrcError::Protocol("Invalid SID parameters".into()));
+        }
+
+        // TODO: Process server introduction
+        Ok(())
+    }
+
+    async fn handle_server_ping(&self, msg: TS6Message) -> IrcResult<()> {
+        // PING source [destination]
+        if msg.params.is_empty() {
+            return Err(IrcError::Protocol("No PING source".into()));
+        }
+
+        // Send PONG response
+        let pong = TS6Message::new(
+            "PONG".to_string(),
+            vec![self.config.server.name.clone(), msg.params[0].clone()]
+        );
+
+        // TODO: Send to correct server
+        Ok(())
+    }
+
+    async fn handle_server_pong(&self, _msg: TS6Message) -> IrcResult<()> {
+        // PONG is handled by the individual server links
+        Ok(())
+    }
+
+    async fn handle_server_quit(&self, msg: TS6Message) -> IrcResult<()> {
+        // SQUIT server reason
+        if msg.params.len() < 2 {
+            return Err(IrcError::Protocol("Invalid SQUIT parameters".into()));
+        }
+
+        let server = &msg.params[0];
+        let reason = &msg.params[1];
+
+        info!("Server {} quit: {}", server, reason);
+        // TODO: Remove server and its users from network
+        Ok(())
+    }
 }
 
 // Update handle_connection to ensure cleanup on any error
@@ -590,6 +737,7 @@ impl Clone for Server {
             registration_timeouts: Arc::clone(&self.registration_timeouts),
             nickname_map: Arc::clone(&self.nickname_map),
             tx: self.tx.clone(),
+            linked_servers: Arc::clone(&self.linked_servers),
         }
     }
 }

@@ -50,13 +50,13 @@ impl Client {
                             if let (Some(nick), Some(user)) = (member.get_nickname(), member.get_username()) {
                                 self.send_numeric(352, &[
                                     channel_name,
-                                    user.as_str(),
+                                    user,
                                     member.get_hostname(),
                                     &self.server_name,
-                                    nick.as_str(),
+                                    nick,
                                     "H", // Here
                                     "0", // Hop count
-                                    member.get_realname().map_or("", |s| s.as_str())
+                                    member.get_realname().map_or("", String::as_str),
                                 ]).await?;
                             }
                         }
@@ -70,35 +70,41 @@ impl Client {
                     let client = client.lock().await;
                     if let Some(nick) = client.get_nickname() {
                         if self.server.mask_match(nick, mask) {
-                            self.send_numeric(352, &[
-                                "*",
-                                client.get_username().map_or("", |s| s.as_str()),
-                                client.get_hostname(),
-                                &self.server_name,
-                                nick.as_str(),
-                                "H", // Here
-                                "0", // Hop count
-                                client.get_realname().map_or("", |s| s.as_str())
-                            ]).await?;
+                            if let Some(user) = client.get_username() {
+                                self.send_numeric(352, &[
+                                    "*",
+                                    user,
+                                    client.get_hostname(),
+                                    &self.server_name,
+                                    nick,
+                                    "H", // Here
+                                    "0", // Hop count
+                                    client.get_realname().map_or("", String::as_str),
+                                ]).await?;
+                            }
                         }
                     }
                 }
             }
             None => {
-                // WHO with no parameters - list all visible users
+                // WHO with no target - list all visible users
                 let clients = self.server.get_all_clients().await;
                 for client in clients {
                     let client = client.lock().await;
-                    if let Some(nick) = client.get_nickname() {
+                    if let (Some(nick), Some(user)) = (client.get_nickname(), client.get_username()) {
+                        // Skip invisible users unless operator
+                        if client.modes.contains(&'i') && !self.modes.contains(&'o') {
+                            continue;
+                        }
                         self.send_numeric(352, &[
                             "*",
-                            client.get_username().map_or("", |s| s.as_str()),
+                            user,
                             client.get_hostname(),
                             &self.server_name,
-                            nick.as_str(),
+                            nick,
                             "H", // Here
                             "0", // Hop count
-                            client.get_realname().map_or("", |s| s.as_str())
+                            client.get_realname().map_or("", String::as_str),
                         ]).await?;
                     }
                 }
@@ -106,7 +112,7 @@ impl Client {
         }
 
         // End of WHO list
-        self.send_numeric(315, &[message.params.first().unwrap_or(&"*".to_string()), "End of WHO list"]).await?;
+        self.send_numeric(315, &[target.map_or("*", |v| v), "End of WHO list"]).await?;
         Ok(())
     }
 

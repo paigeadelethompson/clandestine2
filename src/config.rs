@@ -14,6 +14,8 @@ pub struct ServerConfig {
     pub database: Option<DatabaseConfig>,
     #[serde(default)]
     pub timeouts: Timeouts,
+    #[serde(default)]
+    pub links: Vec<ServerLinkConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -167,6 +169,17 @@ fn default_ping_interval() -> u64 {
 
 fn default_ping_timeout() -> u64 {
     128 // Default ping timeout in seconds
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerLinkConfig {
+    pub name: String,
+    pub sid: String,
+    pub description: String,
+    pub password: String,
+    pub address: String,  // IP:Port for connecting
+    pub autoconnect: bool,
+    pub ssl: bool,
 }
 
 impl ServerConfig {
