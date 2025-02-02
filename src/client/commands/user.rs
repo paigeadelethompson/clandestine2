@@ -14,18 +14,12 @@ impl Client {
             return Err(IrcError::Protocol("No nickname given".into()));
         }
 
-        let new_nick = &message.params[0];
+        let new_nick = message.params[0].clone();
         debug!("Client {} requesting nick change to {}", self.id, new_nick);
 
-        // Check nickname format
-        if !new_nick.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
-            return Err(IrcError::Protocol("Invalid nickname".into()));
-        }
-
         // Check if nickname is available
-        if !self.server.check_nickname(new_nick).await {
-            self.send_numeric(433, &[new_nick, "Nickname is already in use"]).await?;
-            return Ok(());
+        if let Err(e) = self.server.register_nickname(&new_nick, self.id).await {
+            return Err(e);
         }
 
         // If we already had a nickname, unregister it
@@ -33,27 +27,11 @@ impl Client {
             self.server.unregister_nickname(old_nick).await;
         }
 
-        // Register new nickname
-        if let Err(e) = self.server.register_nickname(new_nick, self.id).await {
-            self.send_numeric(433, &[new_nick, "Nickname is already in use"]).await?;
-            return Ok(());
-        }
+        // Store the nickname in the client struct
+        self.nickname = Some(new_nick);
+        debug!("Client {} nickname set to {:?}", self.id, self.nickname);
 
-        // Update nickname
-        let old_nick = self.nickname.clone();
-        self.nickname = Some(new_nick.to_string());
-
-        // If this is a nick change (not initial registration)
-        if let Some(old_nick) = old_nick {
-            let nick_msg = TS6Message::with_source(
-                self.get_prefix(),
-                "NICK".to_string(),
-                vec![new_nick.to_string()]
-            );
-            self.server.broadcast_global(&nick_msg.to_string()).await?;
-        }
-
-        // Try registration if we have both nick and user
+        // Check if we can complete registration
         self.check_registration().await?;
 
         Ok(())

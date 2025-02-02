@@ -95,34 +95,44 @@ impl Client {
             loop {
                 tokio::select! {
                     // Handle immediate messages
-                    Some(msg) = rx.recv() => {
-                        debug!("Writer task: Got immediate message to send: {:?}", String::from_utf8_lossy(&msg));
-                        if let Err(e) = writer.write_all(&msg).await {
-                            error!("Failed to write to stream: {}", e);
-                            break;
-                        }
-                        if let Err(e) = writer.flush().await {
-                            error!("Failed to flush stream: {}", e);
-                            break;
+                    msg = rx.recv() => {
+                        match msg {
+                            Some(msg) => {
+                                debug!("Writer task: Got immediate message to send: {:?}", String::from_utf8_lossy(&msg));
+                                if let Err(e) = writer.write_all(&msg).await {
+                                    error!("Failed to write to stream: {}", e);
+                                    break;
+                                }
+                                if let Err(e) = writer.flush().await {
+                                    error!("Failed to flush stream: {}", e);
+                                    break;
+                                }
+                            }
+                            None => break, // Channel closed
                         }
                     }
                     
                     // Handle queued messages
-                    Some(msg) = sendq_rx.recv() => {
-                        if current_sendq_size + msg.len() <= Self::MAX_SENDQ {
-                            current_sendq_size += msg.len();
-                            debug!("Writer task: Got queued message to send: {:?}", String::from_utf8_lossy(&msg));
-                            if let Err(e) = writer.write_all(&msg).await {
-                                error!("Failed to write to stream: {}", e);
-                                break;
+                    msg = sendq_rx.recv() => {
+                        match msg {
+                            Some(msg) => {
+                                if current_sendq_size + msg.len() <= Self::MAX_SENDQ {
+                                    current_sendq_size += msg.len();
+                                    debug!("Writer task: Got queued message to send: {:?}", String::from_utf8_lossy(&msg));
+                                    if let Err(e) = writer.write_all(&msg).await {
+                                        error!("Failed to write to stream: {}", e);
+                                        break;
+                                    }
+                                    if let Err(e) = writer.flush().await {
+                                        error!("Failed to flush stream: {}", e);
+                                        break;
+                                    }
+                                    current_sendq_size = current_sendq_size.saturating_sub(msg.len());
+                                } else {
+                                    debug!("Dropping message due to sendq full");
+                                }
                             }
-                            if let Err(e) = writer.flush().await {
-                                error!("Failed to flush stream: {}", e);
-                                break;
-                            }
-                            current_sendq_size = current_sendq_size.saturating_sub(msg.len());
-                        } else {
-                            debug!("Dropping message due to sendq full");
+                            None => break, // Channel closed
                         }
                     }
                 }
@@ -161,7 +171,7 @@ impl Client {
 
     fn start_ping_timer(&mut self) {
         let client_id = self.id;
-        let tx = self.tx.clone();
+        let tx = self.sendq_tx.clone();  // Use sendq_tx instead of tx for PINGs
         let mut pong_rx = self.pong_tx.subscribe();
         let server_name = self.server_name.clone();
         let ping_interval = self.ping_interval;
@@ -169,40 +179,45 @@ impl Client {
         
         self.ping_timer = Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(ping_interval);
-            let mut last_ping = Instant::now();
-            let mut last_pong = Instant::now();
+            interval.tick().await; // Skip first tick
+            
+            let mut last_ping = None;
             
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        // Check if we've exceeded the timeout
                         let now = Instant::now();
-                        if now.duration_since(last_pong) > ping_timeout {
-                            debug!("Client {} ping timeout", client_id);
-                            let timeout_msg = "ERROR :Ping timeout\r\n".as_bytes().to_vec();
-                            if tx.send(timeout_msg).is_err() {
-                                debug!("Failed to send timeout message - channel closed");
+                        
+                        // Only check timeout if we've sent a ping
+                        if let Some(ping_time) = last_ping {
+                            if now.duration_since(ping_time) > ping_timeout {
+                                debug!("Client {} ping timeout - no PONG received", client_id);
+                                let timeout_msg = "ERROR :Ping timeout\r\n".as_bytes().to_vec();
+                                if tx.send(timeout_msg).is_err() {
+                                    debug!("Failed to send timeout message - channel closed");
+                                }
+                                break;
                             }
-                            break;
                         }
 
-                        // Send a new ping
+                        // Send a new ping - add colon before param to match client's PONG format
                         debug!("Server sending PING to client {}", client_id);
                         let ping_msg = format!(":{} PING :{}\r\n", server_name, server_name);
                         match tx.send(ping_msg.into_bytes()) {
-                            Ok(_) => debug!("Successfully queued PING message for client {}", client_id),
+                            Ok(_) => {
+                                debug!("Successfully queued PING message for client {}", client_id);
+                                last_ping = Some(now);
+                            }
                             Err(e) => {
                                 debug!("Failed to send PING message: {} - channel closed", e);
                                 break;
                             }
                         }
-                        
-                        last_ping = now;
                     }
                     
                     Ok(_) = pong_rx.recv() => {
                         debug!("Received PONG update for client {}", client_id);
-                        last_pong = Instant::now();
+                        last_ping = None; // Reset ping timer when we get a PONG
                     }
                 }
             }
@@ -290,6 +305,10 @@ impl Client {
     }
 
     pub fn get_nickname(&self) -> Option<&String> {
+        debug!("Getting nickname for client {}: {:?}", self.id, self.nickname);
+        if let Some(ref nick) = self.nickname {
+            debug!("Found nickname {} for client {}", nick, self.id);
+        }
         self.nickname.as_ref()
     }
 
@@ -379,6 +398,8 @@ impl Client {
     }
 
     pub async fn handle_message(&mut self, message: TS6Message) -> IrcResult<()> {
+        debug!("Handling message: {:?}", message);
+        
         match message.command.as_str() {
             // CAP must be handled first
             "CAP" => self.handle_cap(message).await,
@@ -398,20 +419,17 @@ impl Client {
             "NICK" => self.handle_nick(message).await,
             "USER" => self.handle_user(message).await,
             "QUIT" => self.handle_quit(message).await,
-
-            // All other commands require completed registration
-            cmd if !self.registered => {
-                warn!("Unregistered client {} sent command: {}", self.id, cmd);
-                Err(IrcError::Protocol("Not registered".into()))
-            }
-
-            // Normal commands after registration
+            "JOIN" => {
+                debug!("Received JOIN command with params: {:?}", message.params);
+                self.handle_join(message).await
+            },
+            "WHOIS" => {
+                debug!("Received WHOIS command with params: {:?}", message.params);
+                self.handle_whois(message).await
+            },
             "PING" => self.handle_ping(message).await,
             "PONG" => self.handle_pong(message).await,
             "MODE" => self.handle_mode(message).await,
-            "WHOIS" => self.handle_whois(message).await,
-            "JOIN" => self.handle_join(message).await,
-            "PART" => self.handle_part(message).await,
             "PRIVMSG" => self.handle_privmsg(message).await,
             "NOTICE" => self.handle_notice(message).await,
             "MOTD" => self.handle_motd(message).await,

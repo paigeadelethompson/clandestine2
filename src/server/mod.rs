@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 use chrono::{DateTime, Utc};
 use regex;
 use std::time::Duration;
+use std::sync::mpsc::{self, Sender, Receiver};
 
 pub struct Server {
     pub(crate) config: Arc<ServerConfig>,
@@ -23,6 +24,8 @@ pub struct Server {
     database: Option<Arc<Database>>,
     nicknames: Arc<RwLock<HashMap<String, ClientId>>>,
     registration_timeouts: Arc<RwLock<HashMap<ClientId, tokio::time::Instant>>>,
+    nickname_map: Arc<RwLock<HashMap<String, ClientId>>>,
+    tx: mpsc::Sender<ServerMessage>,
 }
 
 type ClientId = u32;
@@ -41,6 +44,21 @@ pub struct ServerStats {
     pub max_global_users: usize,
 }
 
+pub enum ServerMessage {
+    WhoisLookup { 
+        nickname: String, 
+        respond_to: mpsc::Sender<Option<WhoisInfo>> 
+    },
+}
+
+#[derive(Clone)]
+pub struct WhoisInfo {
+    pub nickname: String,
+    pub username: String,
+    pub hostname: String,
+    pub realname: String,
+}
+
 impl Server {
     const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
     
@@ -55,6 +73,8 @@ impl Server {
             None
         };
 
+        let (tx, rx) = mpsc::channel();
+        
         let server = Self {
             config: Arc::new(config),
             clients: Arc::new(RwLock::new(Vec::new())),
@@ -63,12 +83,19 @@ impl Server {
             database,
             nicknames: Arc::new(RwLock::new(HashMap::new())),
             registration_timeouts: Arc::new(RwLock::new(HashMap::new())),
+            nickname_map: Arc::new(RwLock::new(HashMap::new())),
+            tx,
         };
 
         // Load persisted lines if database is configured
         if let Some(db) = &server.database {
             server.load_persisted_lines(db).await?;
         }
+
+        // Spawn the server task in a new thread since we're using std::sync::mpsc
+        std::thread::spawn(move || {
+            server_task(rx);
+        });
 
         Ok(server)
     }
@@ -181,33 +208,18 @@ impl Server {
         let nickname_lower = nickname.to_lowercase();
         debug!("find_client_by_nick: Looking for nickname {} (lowercase: {})", nickname, nickname_lower);
         
-        // Clone the map of clients first while holding the read lock
-        let clients = {
-            let client_map = self.client_map.read().await;
-            client_map.values().cloned().collect::<Vec<_>>()
+        // First look up the client ID in the nickname map
+        let client_id = {
+            let nicknames = self.nickname_map.read().await;
+            nicknames.get(&nickname_lower).copied()
         };
-        
-        // Now check nicknames without holding the map lock
-        for client_arc in clients {
-            let found = {
-                if let Ok(client) = client_arc.try_lock() {
-                    if let Some(nick) = client.get_nickname() {
-                        debug!("find_client_by_nick: Comparing with client nickname: {}", nick);
-                        nick.to_lowercase() == nickname_lower
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }; // lock is dropped here
-            
-            if found {
-                debug!("find_client_by_nick: Found match!");
-                return Some(client_arc);
-            }
+
+        // Then get the client from the client map if we found an ID
+        if let Some(id) = client_id {
+            let clients = self.client_map.read().await;
+            return clients.get(&id).cloned();
         }
-        
+
         debug!("find_client_by_nick: No match found for {}", nickname);
         None
     }
@@ -412,21 +424,23 @@ impl Server {
         !nicknames.contains_key(&nickname.to_lowercase())
     }
 
-    pub async fn register_nickname(&self, nickname: &str, client_id: ClientId) -> Result<(), IrcError> {
-        let mut nicknames = self.nicknames.write().await;
-        let nick_lower = nickname.to_lowercase();
+    pub async fn register_nickname(&self, nickname: &str, client_id: ClientId) -> IrcResult<()> {
+        let nickname_lower = nickname.to_lowercase();
+        let mut nicknames = self.nickname_map.write().await;
         
-        if nicknames.contains_key(&nick_lower) {
-            Err(IrcError::Protocol("Nickname is already in use".into()))
-        } else {
-            nicknames.insert(nick_lower, client_id);
-            Ok(())
+        if nicknames.contains_key(&nickname_lower) {
+            return Err(IrcError::Protocol("Nickname is already in use".into()));
         }
+
+        debug!("Registering nickname {} for client {}", nickname, client_id);
+        nicknames.insert(nickname_lower, client_id);
+        Ok(())
     }
 
     pub async fn unregister_nickname(&self, nickname: &str) {
-        let mut nicknames = self.nicknames.write().await;
-        nicknames.remove(&nickname.to_lowercase());
+        let nickname_lower = nickname.to_lowercase();
+        let mut nicknames = self.nickname_map.write().await;
+        nicknames.remove(&nickname_lower);
     }
 
     async fn start_registration_timeout(&self, client_id: ClientId) {
@@ -486,6 +500,17 @@ impl Server {
         }
         
         client_channels
+    }
+
+    pub async fn find_client_info(&self, nickname: &str) -> Option<WhoisInfo> {
+        let (resp_tx, resp_rx) = mpsc::channel();
+        
+        self.tx.send(ServerMessage::WhoisLookup {
+            nickname: nickname.to_string(),
+            respond_to: resp_tx,
+        }).expect("Server task died");
+
+        resp_rx.recv().expect("Server task died")
     }
 }
 
@@ -563,6 +588,21 @@ impl Clone for Server {
             database: self.database.clone(),
             nicknames: Arc::clone(&self.nicknames),
             registration_timeouts: Arc::clone(&self.registration_timeouts),
+            nickname_map: Arc::clone(&self.nickname_map),
+            tx: self.tx.clone(),
+        }
+    }
+}
+
+async fn server_task(rx: mpsc::Receiver<ServerMessage>) {
+    let mut clients: HashMap<String, WhoisInfo> = HashMap::new();
+
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            ServerMessage::WhoisLookup { nickname, respond_to } => {
+                let info = clients.get(&nickname.to_lowercase()).cloned();
+                respond_to.send(info).ok();
+            }
         }
     }
 } 

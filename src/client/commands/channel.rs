@@ -12,52 +12,38 @@ impl Client {
         let channel_name = &message.params[0];
         debug!("Client {} attempting to join channel {}", self.id, channel_name);
 
-        // Check membership first without holding locks
-        let is_first_user = !self.server.check_channel_membership(channel_name, self.id).await;
-
         // Join channel
         {
             let channel = self.server.get_or_create_channel(channel_name).await;
             let mut channel = channel.write().await;
             channel.add_member(self.id);
+            
+            // Send JOIN confirmation to all channel members (including the joining client)
+            let join_msg = format!(":{} JOIN {}\r\n", self.get_prefix(), channel_name);
+            self.write_raw(join_msg.as_bytes()).await?;
+            
+            // Send topic or RPL_NOTOPIC
+            if let Some(topic) = channel.get_topic() {
+                self.send_numeric(332, &[channel_name, &topic]).await?;
+                let (_, setter, time) = channel.get_topic_details();
+                if let Some(setter) = setter {
+                    self.send_numeric(333, &[channel_name, &setter, &time.timestamp().to_string()]).await?;
+                }
+            } else {
+                self.send_numeric(331, &[channel_name, "No topic is set"]).await?;
+            }
         }
 
-        // Send JOIN message
-        let join_msg = TS6Message::with_source(
-            self.get_prefix(),
-            "JOIN".to_string(),
-            vec![channel_name.clone()]
-        );
-        self.server.broadcast_to_channel(channel_name, &join_msg, None).await?;
-
-        // Get member list for NAMES
-        let names = {
-            let channel = self.server.get_or_create_channel(channel_name).await;
-            let channel = channel.read().await;
-            let member_ids = channel.get_members().clone(); // Clone to avoid holding lock
-            drop(channel);
-
-            // Now get member info without holding channel lock
-            let mut names = Vec::new();
-            for id in member_ids {
-                if let Some(client) = self.server.get_client(id).await {
-                    if let Ok(client) = client.try_lock() {
-                        if let Some(ref nick) = client.nickname {
-                            names.push(nick.clone());
-                        }
-                    }
-                }
-            }
-            names
-        };
-
         // Send NAMES list
-        self.send_numeric(353, &[
-            "=",
-            channel_name,
-            &names.join(" ")
-        ]).await?;
-        self.send_numeric(366, &[channel_name, "End of /NAMES list."]).await?;
+        let channel = self.server.get_channel(channel_name).await.unwrap();
+        let channel = channel.read().await;
+        let member_ids = channel.get_members();
+        
+        // Start of NAMES list
+        self.send_numeric(353, &["=", channel_name, &self.get_nickname().unwrap()]).await?;
+        
+        // End of NAMES list
+        self.send_numeric(366, &[channel_name, "End of /NAMES list"]).await?;
 
         Ok(())
     }

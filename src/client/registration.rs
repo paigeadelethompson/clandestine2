@@ -48,6 +48,9 @@ impl Client {
         self.send_numeric(372, &["- Welcome to IRCd-rs!"]).await?;
         self.send_numeric(376, &["End of /MOTD command."]).await?;
 
+        // Start ping timer after registration is complete
+        self.start_ping_timer();
+
         debug!("Completed registration sequence for client {}", self.id);
         Ok(())
     }

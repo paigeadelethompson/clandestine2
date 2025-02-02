@@ -11,23 +11,16 @@ impl Client {
         }
 
         let target = &message.params[0];
-        if let Some(client) = self.server.find_client_by_nick(target).await {
-            let client = client.lock().await;
-            
+        debug!("Processing WHOIS for target: {}", target);
+
+        if let Some(info) = self.server.find_client_info(target).await {
             // RPL_WHOISUSER (311)
             self.send_numeric(311, &[
                 target,
-                client.get_username().map_or("*", |s| s.as_str()),
-                client.get_hostname(),
+                &info.username,
+                &info.hostname,
                 "*",
-                client.get_realname().map_or("*", |s| s.as_str())
-            ]).await?;
-
-            // RPL_WHOISSERVER (312)
-            self.send_numeric(312, &[
-                target,
-                &self.server_name,
-                "IRCd-rs Server"
+                &info.realname
             ]).await?;
 
             // RPL_ENDOFWHOIS (318)

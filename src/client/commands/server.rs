@@ -1,3 +1,4 @@
+use tracing::warn;
 use super::*;
 use crate::error::{IrcError, IrcResult};
 use crate::ts6::TS6Message;
@@ -15,23 +16,17 @@ impl Client {
             
         debug!("Sending PONG response to client {} with param: {}", self.id, param);
         
-        // Create and send PONG response
-        let pong = TS6Message::with_source(
-            self.server_name.clone(),
-            "PONG".to_string(),
-            vec![param.clone()]
-        );
-        
-        // Send the PONG response
-        self.send_message(&pong).await
+        // Send raw PONG response - use exact format client expects
+        let pong = format!(":{} PONG {} :{}\r\n", self.server_name, self.server_name, param);
+        self.write_raw(pong.as_bytes()).await
     }
 
     pub(crate) async fn handle_pong(&mut self, message: TS6Message) -> IrcResult<()> {
         debug!("Received PONG from client {}", self.id);
-        
-        // Send pong update through broadcast channel
-        self.pong_tx.send(()).ok();
-        
+        // Send notification through the pong channel
+        if let Err(e) = self.pong_tx.send(()) {
+            warn!("Failed to send PONG notification: {}", e);
+        }
         Ok(())
     }
 
