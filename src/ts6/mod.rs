@@ -38,38 +38,33 @@ impl TS6Message {
     }
 
     pub fn to_string(&self) -> String {
-        let mut result = String::new();
+        let mut parts = Vec::new();
         
-        // Add tags if present
-        if !self.tags.is_empty() {
-            result.push('@');
-            let tags: Vec<_> = self.tags.iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect();
-            result.push_str(&tags.join(";"));
-            result.push(' ');
+        // Add source if present
+        if let Some(ref source) = self.source {
+            parts.push(format!(":{}", source));
         }
         
-        if let Some(src) = &self.source {
-            result.push(':');
-            result.push_str(src);
-            result.push(' ');
-        }
+        // Add command
+        parts.push(self.command.clone());
         
-        result.push_str(&self.command);
-        
-        for param in &self.params {
-            result.push(' ');
-            if param.contains(' ') {
-                result.push(':');
-                result.push_str(param);
-                break;
+        // Add parameters
+        if !self.params.is_empty() {
+            // Add all parameters except the last one
+            if self.params.len() > 1 {
+                parts.extend(self.params[..self.params.len()-1].iter().cloned());
+            }
+            
+            // Add last parameter with colon if it contains spaces or is empty
+            let last_param = &self.params[self.params.len()-1];
+            if last_param.contains(' ') || last_param.is_empty() {
+                parts.push(format!(":{}", last_param));
             } else {
-                result.push_str(param);
+                parts.push(format!(":{}", last_param)); // Always add colon for trailing parameter
             }
         }
         
-        result
+        parts.join(" ")
     }
 }
 
