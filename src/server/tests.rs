@@ -8,16 +8,23 @@ mod tests {
     use crate::server::Server;
     use crate::config::{ServerConfig, KLine};
     use crate::client::Client;
+    use tokio::time::{sleep, Duration};
+    use std::net::TcpStream as StdTcpStream;
 
-    // Helper function to create a test config
-    fn test_config() -> ServerConfig {
+    // Each test gets its own port in the 6900 range
+    const PORT_CLIENT_MANAGEMENT: u16 = 6901;
+    const PORT_CHANNEL_MANAGEMENT: u16 = 6902;
+    const PORT_ACCESS_CONTROL: u16 = 6903;
+
+    // Helper function to create a test config with specified port
+    fn test_config(port: u16) -> ServerConfig {
         ServerConfig {
             server: crate::config::Server {
                 name: "test.server".to_string(),
                 description: "Test Server".to_string(),
                 sid: "001".to_string(),
                 bind_addr: "127.0.0.1".to_string(),
-                port: 6667,
+                port,
             },
             network: crate::config::Network {
                 name: "TestNet".to_string(),
@@ -35,10 +42,41 @@ mod tests {
         }
     }
 
+    async fn wait_for_server(addr: &SocketAddr) {
+        for _ in 0..50 {  // Try for 5 seconds
+            if StdTcpStream::connect(addr).is_ok() {
+                return;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        panic!("Server failed to start within timeout");
+    }
+
+    async fn start_server(server: Arc<Server>, port: u16) {
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        
+        // Spawn the server accept loop
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let server = Arc::clone(&server);
+                tokio::spawn(async move {
+                    crate::server::handle_connection(stream, server).await.ok();
+                });
+            }
+        });
+    }
+
     #[tokio::test]
     async fn test_client_management() {
-        let server = Arc::new(Server::new(test_config()).await.unwrap());
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server = Arc::new(Server::new(test_config(PORT_CLIENT_MANAGEMENT)).await.unwrap());
+        let addr: SocketAddr = format!("127.0.0.1:{}", PORT_CLIENT_MANAGEMENT).parse().unwrap();
+        
+        // Start the server
+        start_server(Arc::clone(&server), PORT_CLIENT_MANAGEMENT).await;
+        
+        // Wait for server to be ready
+        wait_for_server(&addr).await;
         
         // Create test client
         let stream = TcpStream::connect(addr).await.unwrap();
@@ -71,7 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_management() {
-        let server = Arc::new(Server::new(test_config()).await.unwrap());
+        let server = Arc::new(Server::new(test_config(PORT_CHANNEL_MANAGEMENT)).await.unwrap());
         
         // Test channel creation
         let channel = server.get_or_create_channel("#test").await;
@@ -96,7 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_access_control() {
-        let mut config = test_config();
+        let mut config = test_config(PORT_ACCESS_CONTROL);
         config.access.klines.push(KLine {
             mask: "*!*@banned.com".to_string(),
             reason: "Test ban".to_string(),
@@ -106,7 +144,14 @@ mod tests {
         });
         
         let server = Arc::new(Server::new(config).await.unwrap());
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let addr: SocketAddr = format!("127.0.0.1:{}", PORT_ACCESS_CONTROL).parse().unwrap();
+        
+        // Start the server
+        start_server(Arc::clone(&server), PORT_ACCESS_CONTROL).await;
+        
+        // Wait for server to be ready
+        wait_for_server(&addr).await;
+        
         let stream = TcpStream::connect(addr).await.unwrap();
         
         // Create client without Arc<Mutex<>>

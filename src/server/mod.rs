@@ -662,7 +662,7 @@ impl Server {
 }
 
 // Update handle_connection to ensure cleanup on any error
-async fn handle_connection(mut stream: TcpStream, server: Arc<Server>) -> IrcResult<()> {
+pub async fn handle_connection(stream: TcpStream, server: Arc<Server>) -> IrcResult<()> {
     let addr = stream.peer_addr()?;
     stream.set_nodelay(true)?;
     debug!("Starting new connection handler for {}", addr);
