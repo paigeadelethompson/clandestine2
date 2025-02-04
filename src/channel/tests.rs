@@ -46,10 +46,41 @@ mod tests {
         // First client creates channel
         client1.join("#test").await.unwrap();
 
+        // Verify client1 is in channel and has operator status
+        let mut found_nick1 = false;
+        loop {
+            let msg = client1.read_message().await.unwrap();
+            if msg.contains("353") && msg.contains("@nick1") { // RPL_NAMREPLY with @ for operator
+                found_nick1 = true;
+            }
+            if msg.contains("366") { // RPL_ENDOFNAMES
+                break;
+            }
+        }
+        assert!(found_nick1, "First client should be in channel with operator status");
+
         // Second client joins
         client2.join("#test").await.unwrap();
 
-        // TODO: Add verification of channel membership through NAMES or WHO
+        // Verify both clients are in channel
+        let mut found_nick1 = false;
+        let mut found_nick2 = false;
+        loop {
+            let msg = client2.read_message().await.unwrap();
+            if msg.contains("353") { // RPL_NAMREPLY
+                if msg.contains("@nick1") {
+                    found_nick1 = true;
+                }
+                if msg.contains("nick2") {
+                    found_nick2 = true;
+                }
+            }
+            if msg.contains("366") { // RPL_ENDOFNAMES
+                break;
+            }
+        }
+        assert!(found_nick1, "First client should still be in channel");
+        assert!(found_nick2, "Second client should be in channel");
     }
 
     #[tokio::test]
