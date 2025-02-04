@@ -688,6 +688,53 @@ impl Server {
         self.config.access.klines.iter()
             .any(|k| self.mask_match(host, &k.mask))
     }
+
+    async fn handle_mode(&self, client: &mut Client, channel_name: &str, modes: &str) -> IrcResult<()> {
+        let channel = self.get_channel(channel_name).await
+            .ok_or_else(|| IrcError::Protocol("No such channel".into()))?;
+
+        // Parse mode string
+        let adding = modes.starts_with('+');
+        let modes = modes.trim_start_matches(|c| c == '+' || c == '-');
+
+        // Apply modes
+        let mut channel = channel.write().await;
+        for mode in modes.chars() {
+            channel.set_mode(mode, None, adding);
+        }
+
+        // Send mode change confirmation to channel
+        let mode_msg = TS6Message::new(
+            "MODE".to_string(),
+            vec![channel_name.to_string(), modes.to_string()]
+        );
+        self.broadcast_to_channel(channel_name, &mode_msg, None).await?;
+
+        Ok(())
+    }
+
+    async fn handle_topic(&self, client: &mut Client, channel_name: &str, topic: &str) -> IrcResult<()> {
+        let channel = self.get_channel(channel_name).await
+            .ok_or_else(|| IrcError::Protocol("No such channel".into()))?;
+
+        // Get nickname, return error if not set
+        let nickname = client.get_nickname()
+            .ok_or_else(|| IrcError::Protocol("Client not registered".into()))?
+            .to_string();
+
+        // Set topic
+        let mut channel = channel.write().await;
+        channel.set_topic(topic.to_string(), nickname);
+
+        // Send topic change confirmation
+        let topic_msg = TS6Message::new(
+            "TOPIC".to_string(),
+            vec![channel_name.to_string(), topic.to_string()]
+        );
+        self.broadcast_to_channel(channel_name, &topic_msg, None).await?;
+
+        Ok(())
+    }
 }
 
 // Update handle_connection to ensure cleanup on any error

@@ -144,14 +144,33 @@ impl TestClient {
 
     // Helper methods
     async fn expect_welcome(&mut self) -> IrcResult<()> {
+        // Add timeout for registration
+        let timeout = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+
         loop {
+            if start.elapsed() > timeout {
+                return Err(IrcError::Protocol("Registration timed out".to_string()));
+            }
+
             let msg = self.read_message().await?;
+            
+            // Log message for debugging
+            tracing::debug!("Registration message: {}", msg);
+            
+            // Check for success or failure conditions
             if msg.contains("001") {  // RPL_WELCOME
                 return Ok(());
             }
             if msg.contains("433") {  // ERR_NICKNAMEINUSE
                 return Err(IrcError::Protocol("Nickname already in use".to_string()));
             }
+            if msg.contains("465") {  // ERR_YOUREBANNEDCREEP
+                return Err(IrcError::Protocol("You are banned".to_string())); 
+            }
+            
+            // Small delay to prevent tight loop
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -205,23 +224,33 @@ impl TestClient {
 
     pub async fn set_channel_mode(&mut self, channel: &str, mode: &str) -> IrcResult<()> {
         self.send_raw(&format!("MODE {} {}", channel, mode)).await?;
-        self.expect_mode_response(channel, mode).await
+        self.expect_mode_response(channel, mode, Duration::from_secs(5)).await
     }
 
     pub async fn set_channel_ban(&mut self, channel: &str, mask: &str) -> IrcResult<()> {
         self.send_raw(&format!("MODE {} +b {}", channel, mask)).await?;
-        self.expect_mode_response(channel, &format!("+b {}", mask)).await
+        self.expect_mode_response(channel, &format!("+b {}", mask), Duration::from_secs(5)).await
     }
 
-    async fn expect_mode_response(&mut self, channel: &str, mode: &str) -> IrcResult<()> {
+    async fn expect_mode_response(&mut self, channel: &str, mode: &str, timeout: Duration) -> IrcResult<()> {
+        let start = std::time::Instant::now();
+
         loop {
+            if start.elapsed() > timeout {
+                return Err(IrcError::Protocol("Mode change timed out".to_string()));
+            }
+
             let msg = self.read_message().await?;
+            tracing::debug!("Mode response: {}", msg);
+
             if msg.contains(&format!("MODE {} {}", channel, mode)) {
                 return Ok(());
             }
             if msg.contains("482") { // ERR_CHANOPRIVSNEEDED
                 return Err(IrcError::Protocol("Not channel operator".to_string()));
             }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 

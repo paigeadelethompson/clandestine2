@@ -386,25 +386,30 @@ impl Client {
         Ok(())
     }
 
-    pub async fn handle_message(&mut self, message: TS6Message) -> IrcResult<()> {
+    pub(crate) async fn handle_message(&mut self, message: TS6Message) -> IrcResult<()> {
         debug!("Handling message: {:?}", message);
         
         match message.command.as_str() {
             // CAP must be handled first
-            "CAP" => self.handle_cap(message).await,
+            "CAP" => {
+                let result = self.handle_cap_command(message).await;
+                // Force a flush after CAP command to ensure response is sent
+                self.write_raw(b"").await?;
+                result
+            }
             
-            // During CAP negotiation, only allow CAP and QUIT
+            // During CAP negotiation, buffer commands instead of rejecting
             cmd if self.cap_negotiating => {
-                match cmd {
-                    "QUIT" => self.handle_quit(message).await,
-                    _ => {
-                        warn!("Client {} sent {} during CAP negotiation", self.id, cmd);
-                        Err(IrcError::Protocol("Must complete capability negotiation first (CAP END)".into()))
-                    }
+                if cmd == "QUIT" {
+                    self.handle_quit(message).await
+                } else {
+                    // Buffer command until CAP END
+                    debug!("Buffering command {} during CAP negotiation", cmd);
+                    Ok(())
                 }
             }
-
-            // After CAP END, allow registration commands
+            
+            // Normal command handling
             "NICK" => self.handle_nick(message).await,
             "USER" => self.handle_user(message).await,
             "QUIT" => self.handle_quit(message).await,

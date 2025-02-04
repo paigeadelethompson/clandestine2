@@ -181,6 +181,7 @@ impl Client {
             let channel = self.server.get_channel(target).await
                 .ok_or_else(|| IrcError::Protocol("No such channel".into()))?;
             
+            debug!("Got channel for mode change: {}", target);
             if message.params.len() == 1 {
                 // Query channel modes
                 let channel = channel.read().await;
@@ -223,12 +224,15 @@ impl Client {
             if !changes.is_empty() {
                 let mut mode_str = String::new();
                 let mut params = Vec::new();
-                let mut adding = true;
-
+                
+                // Always start with + or - based on first change
+                mode_str.push(if changes[0].2 { '+' } else { '-' });
+                
+                let mut current = changes[0].2;
                 for (mode, param, is_adding) in changes {
-                    if is_adding != adding {
-                        adding = is_adding;
-                        mode_str.push(if adding { '+' } else { '-' });
+                    if is_adding != current {
+                        current = is_adding;
+                        mode_str.push(if is_adding { '+' } else { '-' });
                     }
                     mode_str.push(mode);
                     if let Some(param) = param {
@@ -239,12 +243,18 @@ impl Client {
                 let mode_msg = TS6Message::with_source(
                     self.get_prefix(),
                     "MODE".to_string(),
-                    vec![target.to_string(), mode_str]
+                    vec![target.to_string(), mode_str.clone()]
                         .into_iter()
-                        .chain(params)
+                        .chain(params.clone())
                         .collect()
                 );
+
+                // Send to channel members
                 self.server.broadcast_to_channel(target, &mode_msg, None).await?;
+                
+                // Send immediate response back to the client that sent the mode command
+                let response = format!(":{} MODE {} {}", self.server_name, target, mode_str);
+                self.write_raw(response.as_bytes()).await?;
             }
 
             Ok(())
