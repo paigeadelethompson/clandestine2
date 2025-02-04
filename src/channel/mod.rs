@@ -6,6 +6,9 @@ use crate::client::Client;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone)]
 pub struct Channel {
     pub(crate) name: String,
@@ -205,7 +208,3 @@ impl Default for ChannelModes {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "tests.rs"]
-mod tests; 

@@ -1,4 +1,6 @@
 pub mod parser;
+#[cfg(test)]
+mod tests;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
@@ -67,7 +69,3 @@ impl TS6Message {
         parts.join(" ")
     }
 }
-
-#[cfg(test)]
-#[path = "tests.rs"]
-mod tests; 

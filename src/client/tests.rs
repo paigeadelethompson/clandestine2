@@ -1,20 +1,19 @@
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use tokio::sync::Mutex;
-    use tokio::net::TcpStream;
     use std::net::SocketAddr;
     use crate::server::Server;
     use crate::config::ServerConfig;
-    use crate::client::Client;
-    use crate::ts6::TS6Message;
-    use crate::ircv3::Capability;
+    use crate::test_utils::TestClient;
+    use std::collections::HashSet;
     use tokio::time::{sleep, Duration};
-    use std::net::TcpStream as StdTcpStream;
 
     // Each test gets its own port in the 6910 range
     const PORT_CAPABILITY_NEGOTIATION: u16 = 6911;
     const PORT_CAPABILITY_CHECKS: u16 = 6912;
+    const PORT_CLIENT_REGISTRATION: u16 = 6913;
+    const PORT_CLIENT_MODES: u16 = 6914;
+    const PORT_CLIENT_PING: u16 = 6915;
 
     // Helper function to create a test config
     fn test_config(port: u16) -> ServerConfig {
@@ -44,7 +43,7 @@ mod tests {
 
     async fn wait_for_server(addr: &SocketAddr) {
         for _ in 0..50 {  // Try for 5 seconds
-            if StdTcpStream::connect(addr).is_ok() {
+            if std::net::TcpStream::connect(addr).is_ok() {
                 return;
             }
             sleep(Duration::from_millis(100)).await;
@@ -70,163 +69,138 @@ mod tests {
     #[tokio::test]
     async fn test_capability_negotiation() {
         let server = Arc::new(Server::new(test_config(PORT_CAPABILITY_NEGOTIATION)).await.unwrap());
-        let addr: SocketAddr = format!("127.0.0.1:{}", PORT_CAPABILITY_NEGOTIATION).parse().unwrap();
         
-        // Start the server
-        start_server(Arc::clone(&server), PORT_CAPABILITY_NEGOTIATION).await;
-        
-        // Wait for server to be ready
-        wait_for_server(&addr).await;
-        
-        let stream = TcpStream::connect(addr).await.unwrap();
-        let client = Arc::new(Mutex::new(Client::new(
-            stream.into_split().1,
-            addr,
-            "test.server".to_string(),
-            server
-        )));
+        // Start server
+        let server_clone = Arc::clone(&server);
+        tokio::spawn(async move {
+            server_clone.run().await.unwrap();
+        });
 
+        let addr: SocketAddr = format!("127.0.0.1:{}", PORT_CAPABILITY_NEGOTIATION).parse().unwrap();
+        wait_for_server(&addr).await;
+
+        // Connect and test capabilities
+        let mut client = TestClient::connect(addr).await.unwrap();
+        
         // Test CAP LS
-        let cap_ls = TS6Message::new("CAP".to_string(), vec!["LS".to_string()]);
-        client.lock().await.handle_cap(cap_ls).await.unwrap();
-        assert!(client.lock().await.cap_negotiating);
+        client.send_cap_ls().await.unwrap();
+        let caps = client.handle_cap_ls().await.unwrap();
+        assert!(!caps.is_empty());
 
         // Test CAP REQ
-        let cap_req = TS6Message::new("CAP".to_string(), 
-            vec!["REQ".to_string(), "multi-prefix extended-join".to_string()]);
-        client.lock().await.handle_cap(cap_req).await.unwrap();
-        
-        let caps = client.lock().await.enabled_capabilities.clone();
-        assert!(caps.contains(&Capability::MultiPrefix));
-        assert!(caps.contains(&Capability::ExtendedJoin));
+        let cap_list = caps.iter().cloned().collect::<Vec<_>>().join(" ");
+        client.send_raw(&format!("CAP REQ :{}", cap_list)).await.unwrap();
+        client.handle_cap_ack().await.unwrap();
 
         // Test CAP END
-        let cap_end = TS6Message::new("CAP".to_string(), vec!["END".to_string()]);
-        client.lock().await.handle_cap(cap_end).await.unwrap();
-        assert!(!client.lock().await.cap_negotiating);
+        client.send_cap_end().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_capability_checks() {
         let server = Arc::new(Server::new(test_config(PORT_CAPABILITY_CHECKS)).await.unwrap());
+        
+        // Start server properly
+        let server_clone = Arc::clone(&server);
+        tokio::spawn(async move {
+            server_clone.run().await.unwrap();
+        });
+
         let addr: SocketAddr = format!("127.0.0.1:{}", PORT_CAPABILITY_CHECKS).parse().unwrap();
-        
-        // Start the server
-        start_server(Arc::clone(&server), PORT_CAPABILITY_CHECKS).await;
-        
-        // Wait for server to be ready
         wait_for_server(&addr).await;
         
-        let stream = TcpStream::connect(addr).await.unwrap();
-        let client = Arc::new(Mutex::new(Client::new(
-            stream.into_split().1,
-            addr,
-            "test.server".to_string(),
-            server
-        )));
-
-        {
-            let mut client_lock = client.lock().await;
-            client_lock.enabled_capabilities.insert(Capability::MultiPrefix);
-            assert!(client_lock.has_capability(&Capability::MultiPrefix));
-            assert!(!client_lock.has_capability(&Capability::ExtendedJoin));
-        }
+        // Connect and register with specific capabilities
+        let mut client = TestClient::connect(addr).await.unwrap();
+        
+        // Request only multi-prefix capability
+        client.send_cap_ls().await.unwrap();
+        let mut caps = HashSet::new();
+        caps.insert("multi-prefix".to_string());
+        
+        let cap_list = caps.iter().cloned().collect::<Vec<_>>().join(" ");
+        client.send_raw(&format!("CAP REQ :{}", cap_list)).await.unwrap();
+        client.handle_cap_ack().await.unwrap();
+        client.send_cap_end().await.unwrap();
+        
+        // Verify we have multi-prefix but not extended-join
+        assert!(client.has_capability("multi-prefix"));
+        assert!(!client.has_capability("extended-join"));
     }
 
     #[tokio::test]
     async fn test_client_registration() {
-        let server = Arc::new(Server::new(test_config(6920)).await.unwrap());
-        let addr: SocketAddr = format!("127.0.0.1:{}", 6920).parse().unwrap();
+        let server = Arc::new(Server::new(test_config(PORT_CLIENT_REGISTRATION)).await.unwrap());
         
-        start_server(Arc::clone(&server), 6920).await;
+        // Start server properly
+        let server_clone = Arc::clone(&server);
+        tokio::spawn(async move {
+            server_clone.run().await.unwrap();
+        });
+
+        let addr: SocketAddr = format!("127.0.0.1:{}", PORT_CLIENT_REGISTRATION).parse().unwrap();
         wait_for_server(&addr).await;
         
-        let stream = TcpStream::connect(addr).await.unwrap();
-        let client = Arc::new(Mutex::new(Client::new(
-            stream.into_split().1,
-            addr,
-            "test.server".to_string(),
-            server
-        )));
-
-        // Test NICK command
-        {
-            let mut client_lock = client.lock().await;
-            let nick_msg = TS6Message::new("NICK".to_string(), vec!["testnick".to_string()]);
-            client_lock.handle_nick(nick_msg).await.unwrap();
-            assert_eq!(client_lock.get_nickname().unwrap(), "testnick");
-        }
-
-        // Test USER command
-        {
-            let mut client_lock = client.lock().await;
-            let user_msg = TS6Message::new(
-                "USER".to_string(), 
-                vec!["testuser".to_string(), "0".to_string(), "*".to_string(), "Real Name".to_string()]
-            );
-            client_lock.handle_user(user_msg).await.unwrap();
-            assert_eq!(client_lock.username.as_ref().unwrap(), "testuser");
-            assert_eq!(client_lock.realname.as_ref().unwrap(), "Real Name");
-        }
+        // Test successful registration
+        let mut client1 = TestClient::connect(addr).await.unwrap();
+        let result = client1.register("testnick", "testuser", "test.com").await;
+        assert!(result.is_ok());
+        assert_eq!(client1.nickname(), "testnick");
+        assert_eq!(client1.username(), "testuser");
+        
+        // Test registration with taken nickname
+        let mut client2 = TestClient::connect(addr).await.unwrap();
+        let result = client2.register("testnick", "otheruser", "test.com").await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_client_modes() {
-        let server = Arc::new(Server::new(test_config(6921)).await.unwrap());
-        let addr: SocketAddr = format!("127.0.0.1:{}", 6921).parse().unwrap();
+        let server = Arc::new(Server::new(test_config(PORT_CLIENT_MODES)).await.unwrap());
         
-        start_server(Arc::clone(&server), 6921).await;
+        // Start server properly
+        let server_clone = Arc::clone(&server);
+        tokio::spawn(async move {
+            server_clone.run().await.unwrap();
+        });
+
+        let addr: SocketAddr = format!("127.0.0.1:{}", PORT_CLIENT_MODES).parse().unwrap();
         wait_for_server(&addr).await;
         
-        let stream = TcpStream::connect(addr).await.unwrap();
-        let client = Arc::new(Mutex::new(Client::new(
-            stream.into_split().1,
-            addr,
-            "test.server".to_string(),
-            server
-        )));
-
-        {
-            let mut client_lock = client.lock().await;
-            
-            // Test setting user modes
-            let mode_msg = TS6Message::new("MODE".to_string(), vec!["testnick".to_string(), "+i".to_string()]);
-            client_lock.handle_user_mode(mode_msg).await.unwrap();
-            assert!(client_lock.modes.contains(&'i'));
-
-            // Test removing user modes
-            let mode_msg = TS6Message::new("MODE".to_string(), vec!["testnick".to_string(), "-i".to_string()]);
-            client_lock.handle_user_mode(mode_msg).await.unwrap();
-            assert!(!client_lock.modes.contains(&'i'));
-        }
+        // Connect and register client
+        let mut client = TestClient::connect(addr).await.unwrap();
+        client.register("testnick", "testuser", "test.com").await.unwrap();
+        
+        // Test setting user mode
+        client.send_raw("MODE testnick +i").await.unwrap();
+        let response = client.read_message().await.unwrap();
+        assert!(response.contains("+i"));
+        
+        // Test removing user mode
+        client.send_raw("MODE testnick -i").await.unwrap();
+        let response = client.read_message().await.unwrap();
+        assert!(response.contains("-i"));
     }
 
     #[tokio::test]
     async fn test_client_ping_pong() {
-        let server = Arc::new(Server::new(test_config(6922)).await.unwrap());
-        let addr: SocketAddr = format!("127.0.0.1:{}", 6922).parse().unwrap();
+        let server = Arc::new(Server::new(test_config(PORT_CLIENT_PING)).await.unwrap());
         
-        start_server(Arc::clone(&server), 6922).await;
+        // Start server properly
+        let server_clone = Arc::clone(&server);
+        tokio::spawn(async move {
+            server_clone.run().await.unwrap();
+        });
+
+        let addr: SocketAddr = format!("127.0.0.1:{}", PORT_CLIENT_PING).parse().unwrap();
         wait_for_server(&addr).await;
         
-        let stream = TcpStream::connect(addr).await.unwrap();
-        let client = Arc::new(Mutex::new(Client::new(
-            stream.into_split().1,
-            addr,
-            "test.server".to_string(),
-            server
-        )));
-
-        {
-            let mut client_lock = client.lock().await;
-            
-            // Test PING handling
-            let ping_msg = TS6Message::new("PING".to_string(), vec!["server1".to_string()]);
-            client_lock.handle_ping(ping_msg).await.unwrap();
-            
-            // Test PONG handling
-            let pong_msg = TS6Message::new("PONG".to_string(), vec!["server1".to_string(), "server2".to_string()]);
-            client_lock.handle_pong(pong_msg).await.unwrap();
-        }
+        // Connect and register client
+        let mut client = TestClient::connect(addr).await.unwrap();
+        client.register("testnick", "testuser", "test.com").await.unwrap();
+        
+        // Test PING response
+        client.send_raw("PING :test.server").await.unwrap();
+        let response = client.read_message().await.unwrap();
+        assert!(response.starts_with("PONG"));
     }
 } 

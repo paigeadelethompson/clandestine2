@@ -7,6 +7,10 @@ mod error;
 mod cli;
 mod ircv3;
 mod database;
+#[cfg(test)]
+mod test_utils;
+#[cfg(test)]
+mod test_helpers;
 
 use std::error::Error;
 use std::fs;

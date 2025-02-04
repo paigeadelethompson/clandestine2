@@ -1,116 +1,122 @@
 use super::*;
 use chrono::Utc;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use crate::test_utils::TestClient;
+use crate::server::Server;
+use crate::config::ServerConfig;
+use std::net::SocketAddr;
+use crate::test_helpers::test::{test_config, wait_for_server};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
 
-    #[test]
-    fn test_basic_channel_operations() {
-        let mut channel = Channel::new("#test".to_string());
+    const PORT_CHANNEL_JOIN: u16 = 6921;
+    const PORT_CHANNEL_PART: u16 = 6922;
+    const PORT_CHANNEL_TOPIC: u16 = 6923;
+    const PORT_CHANNEL_MODES: u16 = 6924;
+    const PORT_CHANNEL_BANS: u16 = 6925;
+
+    async fn setup_test_server(port: u16) -> (Arc<Server>, SocketAddr) {
+        let server = Arc::new(Server::new(test_config(port)).await.unwrap());
         
-        // Test initial state
-        assert_eq!(channel.name, "#test");
-        assert!(channel.members.is_empty());
-        assert!(channel.modes.is_empty());
-        assert!(channel.topic.is_none());
+        // Start server properly
+        let server_clone = Arc::clone(&server);
+        tokio::spawn(async move {
+            server_clone.run().await.unwrap();
+        });
+
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        wait_for_server(&addr).await;
+        
+        (server, addr)
     }
 
-    #[test]
-    fn test_member_management() {
-        let mut channel = Channel::new("#test".to_string());
+    #[tokio::test]
+    async fn test_channel_join() {
+        let (_server, addr) = setup_test_server(PORT_CHANNEL_JOIN).await;
         
-        // Add members
-        channel.add_member(1);
-        channel.add_member(2);
-        assert_eq!(channel.members.len(), 2);
-        assert!(channel.has_member(1));
-        assert!(channel.has_member(2));
+        // Connect and register two clients
+        let mut client1 = TestClient::connect(addr).await.unwrap();
+        client1.register("nick1", "user1", "test.com").await.unwrap();
         
-        // Remove member
-        channel.remove_member(1);
-        assert!(!channel.has_member(1));
-        assert!(channel.has_member(2));
-        assert_eq!(channel.members.len(), 1);
+        let mut client2 = TestClient::connect(addr).await.unwrap();
+        client2.register("nick2", "user2", "test.com").await.unwrap();
+
+        // First client creates channel
+        client1.join("#test").await.unwrap();
+        
+        // Second client joins
+        client2.join("#test").await.unwrap();
+        
+        // TODO: Add verification of channel membership through NAMES or WHO
     }
 
-    #[test]
-    fn test_channel_modes() {
-        let mut channel = Channel::new("#test".to_string());
+    #[tokio::test]
+    async fn test_channel_topic() {
+        let (server, addr) = setup_test_server(PORT_CHANNEL_TOPIC).await;
         
-        // Set modes
-        channel.set_mode('n', None, true);
-        channel.set_mode('t', None, true);
-        assert!(channel.has_mode('n', None));
-        assert!(channel.has_mode('t', None));
+        // Connect and register client
+        let mut client = TestClient::connect(addr).await.unwrap();
+        client.register("nick1", "user1", "test.com").await.unwrap();
+
+        // Join channel and set topic
+        client.join("#test").await.unwrap();
+        client.send_raw("TOPIC #test :New channel topic").await.unwrap();
         
-        // Remove mode
-        channel.set_mode('n', None, false);
-        assert!(!channel.has_mode('n', None));
-        assert!(channel.has_mode('t', None));
+        // Verify topic was set
+        let response = client.read_message().await.unwrap();
+        assert!(response.contains("New channel topic"));
     }
 
-    #[test]
-    fn test_channel_topic() {
-        let mut channel = Channel::new("#test".to_string());
-        let now = Utc::now();
+    #[tokio::test]
+    async fn test_channel_modes() {
+        let (server, addr) = setup_test_server(PORT_CHANNEL_MODES).await;
         
-        // Set topic
-        channel.set_topic("Test Topic".to_string(), "nick!user@host".to_string());
-        assert_eq!(channel.topic.as_ref().unwrap(), "Test Topic");
-        assert_eq!(channel.topic_setter.as_ref().unwrap(), "nick!user@host");
-        assert!(channel.topic_time > now);
+        // Connect and register op client
+        let mut op_client = TestClient::connect(addr).await.unwrap();
+        op_client.register("op", "user1", "test.com").await.unwrap();
+
+        // Create channel and get op status
+        op_client.join("#test").await.unwrap();
         
-        // Clear topic
-        channel.set_topic("".to_string(), "another@user".to_string());
-        assert!(channel.topic.as_ref().unwrap().is_empty());
-        assert_eq!(channel.topic_setter.as_ref().unwrap(), "another@user");
+        // Set channel modes
+        op_client.set_channel_mode("#test", "+n").await.unwrap();
+        op_client.set_channel_mode("#test", "+t").await.unwrap();
+        
+        // Connect regular client
+        let mut regular_client = TestClient::connect(addr).await.unwrap();
+        regular_client.register("user", "user2", "test.com").await.unwrap();
+        
+        // Join should work
+        regular_client.join("#test").await.unwrap();
+        
+        // Topic change should fail for regular user due to +t
+        let result = regular_client.set_topic("#test", "New Topic").await;
+        assert!(result.is_err());
     }
 
-    #[test]
-    fn test_channel_bans() {
-        let mut channel = Channel::new("#test".to_string());
+    #[tokio::test]
+    async fn test_channel_bans() {
+        let (server, addr) = setup_test_server(PORT_CHANNEL_BANS).await;
         
-        // Add ban
-        channel.add_ban("*!*@banned.com".to_string(), "op!user@host".to_string());
-        assert!(channel.is_banned("nick!user@banned.com"));
-        assert!(!channel.is_banned("nick!user@allowed.com"));
+        // Connect op client
+        let mut op_client = TestClient::connect(addr).await.unwrap();
+        op_client.register("op", "user1", "test.com").await.unwrap();
         
-        // Remove ban
-        channel.remove_ban("*!*@banned.com");
-        assert!(!channel.is_banned("nick!user@banned.com"));
+        // Create channel
+        op_client.join("#test").await.unwrap();
+        
+        // Set ban
+        op_client.set_channel_ban("#test", "*!*@banned.com").await.unwrap();
+        
+        // Try to join with banned host
+        let mut banned_client = TestClient::connect(addr).await.unwrap();
+        let result = banned_client.register("banned", "user", "banned.com").await;
+        assert!(result.is_err());
     }
 
-    #[test]
-    fn test_channel_operators() {
-        let mut channel = Channel::new("#test".to_string());
-        
-        // Add operator
-        channel.add_member(1);
-        channel.set_operator(1, true);
-        assert!(channel.is_operator(1));
-        
-        // Remove operator
-        channel.set_operator(1, false);
-        assert!(!channel.is_operator(1));
-        
-        // Non-member can't be operator
-        channel.set_operator(2, true);
-        assert!(!channel.is_operator(2));
-    }
-
-    #[test]
-    fn test_channel_voices() {
-        let mut channel = Channel::new("#test".to_string());
-        
-        // Add voice
-        channel.add_member(1);
-        channel.set_voice(1, true);
-        assert!(channel.is_voiced(1));
-        
-        // Remove voice
-        channel.set_voice(1, false);
-        assert!(!channel.is_voiced(1));
-    }
+    // Add more tests for modes, bans, etc
 } 

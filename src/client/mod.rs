@@ -33,6 +33,9 @@ use crate::error::{IrcError, IrcResult};
 use crate::config::{ServerConfig, HostmaskConfig};
 use crate::channel::Channel;
 
+#[cfg(test)]
+mod tests;
+
 // Re-exports
 // pub use handler::*;
 pub use registration::*;
@@ -455,7 +458,3 @@ impl Client {
         self.hostname = hostname;
     }
 }
-
-#[cfg(test)]
-#[path = "tests.rs"]
-mod tests; 

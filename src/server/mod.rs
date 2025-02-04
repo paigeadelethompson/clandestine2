@@ -1,4 +1,6 @@
 pub mod link;
+#[cfg(test)]
+mod tests;
 
 use crate::database::Database;
 use crate::channel::Channel;
@@ -319,7 +321,7 @@ impl Server {
         }
 
         // Check K-lines
-        if let Some(kline) = self.is_klined(client).await {
+        if let Some(kline) = self.check_kline(client).await {
             return Err(format!("K-lined: {}", kline.reason));
         }
 
@@ -345,13 +347,10 @@ impl Server {
             })
     }
 
-    async fn is_klined(&self, client: &Client) -> Option<&KLine> {
-        let mask = client.get_mask();
+    async fn check_kline(&self, client: &Client) -> Option<&KLine> {
+        let hostname = client.get_hostname();
         self.config.access.klines.iter()
-            .find(|kline| {
-                self.mask_match(&mask, &kline.mask) && 
-                !self.is_ban_expired(kline.set_time, kline.duration)
-            })
+            .find(|k| self.mask_match(&hostname, &k.mask))
     }
 
     async fn is_glined(&self, client: &Client) -> Option<&GLine> {
@@ -393,6 +392,7 @@ impl Server {
         (Utc::now() - set_time).num_seconds() > duration
     }
 
+    // Change from private to public
     pub fn mask_match(&self, host: &str, mask: &str) -> bool {
         // Implement IRC-style mask matching
         // Convert mask to regex pattern and match
@@ -683,6 +683,11 @@ impl Server {
     pub async fn get_client_count(&self) -> usize {
         self.clients.read().await.len()
     }
+
+    pub async fn is_host_klined(&self, host: &str) -> bool {
+        self.config.access.klines.iter()
+            .any(|k| self.mask_match(host, &k.mask))
+    }
 }
 
 // Update handle_connection to ensure cleanup on any error
@@ -778,7 +783,3 @@ async fn server_task(rx: mpsc::Receiver<ServerMessage>) {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "tests.rs"]
-mod tests; 
