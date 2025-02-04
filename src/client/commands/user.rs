@@ -1,6 +1,8 @@
+use tracing::{debug, info};
+
 use crate::error::{IrcError, IrcResult};
 use crate::ts6::TS6Message;
-use tracing::{debug, info};
+
 use super::super::Client;
 
 impl Client {
@@ -72,7 +74,7 @@ impl Client {
         }
 
         let target = &message.params[0];
-        
+
         // User modes
         if let Some(ref nick) = self.nickname {
             if target == nick {
@@ -120,7 +122,7 @@ impl Client {
         let quit_msg = TS6Message::with_source(
             self.get_prefix(),
             "QUIT".to_string(),
-            vec![quit_message.to_string()]
+            vec![quit_message.to_string()],
         );
 
         // Broadcast quit to all channels user is in

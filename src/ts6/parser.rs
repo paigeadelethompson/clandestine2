@@ -1,6 +1,8 @@
-use super::TS6Message;
 use std::collections::HashMap;
+
 use tracing::debug;
+
+use super::TS6Message;
 
 pub fn parse_message(line: &str) -> Result<TS6Message, String> {
     debug!("Attempting to parse message: {:?}", line);
@@ -17,18 +19,18 @@ pub fn parse_message(line: &str) -> Result<TS6Message, String> {
         if parts.len() != 2 {
             return Err("Failed to parse message tags".to_string());
         }
-        
+
         for tag in parts[0].split(';') {
             if let Some((key, value)) = tag.split_once('=') {
                 tags.insert(key.to_string(), value.to_string());
             }
         }
-        
+
         rest = parts[1];
     }
 
     let mut parts = rest.splitn(2, ' ');
-    
+
     let (source, rest) = if rest.starts_with(':') {
         let source = parts.next()
             .ok_or("Missing source")?[1..].to_string();
@@ -43,7 +45,7 @@ pub fn parse_message(line: &str) -> Result<TS6Message, String> {
     let command = parts.next()
         .ok_or("Missing command")?
         .to_string();
-    
+
     let params = if let Some(param_str) = parts.next() {
         parse_params(param_str)
     } else {
@@ -63,7 +65,7 @@ fn parse_params(param_str: &str) -> Vec<String> {
     let mut parts = param_str.split(' ');
     let mut trailing = String::new();
     let mut in_trailing = false;
-    
+
     while let Some(part) = parts.next() {
         if part.starts_with(':') {
             in_trailing = true;
@@ -75,10 +77,10 @@ fn parse_params(param_str: &str) -> Vec<String> {
             params.push(part.to_string());
         }
     }
-    
+
     if in_trailing {
         params.push(trailing);
     }
-    
+
     params
 } 

@@ -1,6 +1,8 @@
-use crate::error::IrcResult;
 use chrono::Local;
 use tracing::{debug, info};
+
+use crate::error::IrcResult;
+
 use super::Client;
 
 impl Client {
@@ -8,10 +10,10 @@ impl Client {
         debug!("Client {} registration check: nick={:?}, user={:?}, registered={}, cap_negotiating={}", 
             self.id, self.nickname, self.username, self.registered, self.cap_negotiating);
 
-        if !self.registered && 
-           self.nickname.is_some() && 
-           self.username.is_some() && 
-           !self.cap_negotiating {
+        if !self.registered &&
+            self.nickname.is_some() &&
+            self.username.is_some() &&
+            !self.cap_negotiating {
             debug!("All registration requirements met for client {}, completing registration", self.id);
             self.complete_registration().await?;
         } else {

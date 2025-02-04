@@ -1,3 +1,14 @@
+use std::error::Error;
+use std::fs;
+
+use clap::Parser;
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
+
+use crate::cli::{Cli, generate_example_config};
+use crate::config::ServerConfig;
+use crate::server::Server;
+
 mod config;
 mod server;
 mod client;
@@ -11,15 +22,6 @@ mod database;
 mod test_utils;
 #[cfg(test)]
 mod test_helpers;
-
-use std::error::Error;
-use std::fs;
-use crate::config::ServerConfig;
-use crate::server::Server;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
-use clap::Parser;
-use crate::cli::{Cli, generate_example_config};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -50,19 +52,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_target(false)
         .with_env_filter("ircd_rs=debug")
         .init();
-    
+
     info!("Starting IRCd...");
-    
+
     let config = ServerConfig::load(&cli.config).map_err(|e| {
         tracing::error!("Failed to load configuration from {:?}: {}", cli.config, e);
         e
     })?;
-    
+
     info!("Configuration loaded successfully");
     let server = Server::new(config).await?;
-    
+
     info!("Starting server...");
     server.run().await?;
-    
+
     Ok(())
 } 

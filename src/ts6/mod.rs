@@ -1,9 +1,9 @@
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 pub mod parser;
 #[cfg(test)]
 mod tests;
-
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::collections::HashMap;
 
 pub fn generate_ts() -> u64 {
     SystemTime::now()
@@ -41,31 +41,31 @@ impl TS6Message {
 
     pub fn to_string(&self) -> String {
         let mut parts = Vec::new();
-        
+
         // Add source if present
         if let Some(ref source) = self.source {
             parts.push(format!(":{}", source));
         }
-        
+
         // Add command
         parts.push(self.command.clone());
-        
+
         // Add parameters
         if !self.params.is_empty() {
             // Add all parameters except the last one
             if self.params.len() > 1 {
-                parts.extend(self.params[..self.params.len()-1].iter().cloned());
+                parts.extend(self.params[..self.params.len() - 1].iter().cloned());
             }
-            
+
             // Add last parameter with colon if it contains spaces or is empty
-            let last_param = &self.params[self.params.len()-1];
+            let last_param = &self.params[self.params.len() - 1];
             if last_param.contains(' ') || last_param.is_empty() {
                 parts.push(format!(":{}", last_param));
             } else {
                 parts.push(format!(":{}", last_param)); // Always add colon for trailing parameter
             }
         }
-        
+
         parts.join(" ")
     }
 }

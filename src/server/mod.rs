@@ -1,25 +1,27 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use regex;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
+
+use crate::channel::Channel;
+use crate::client::Client;
+use crate::config::{DLine, GLine, ILine, KLine, ServerConfig, ServerLinkConfig};
+use crate::database::Database;
+use crate::error::{IrcError, IrcResult};
+use crate::server::link::ServerLink;
+use crate::ts6::TS6Message;
+
 pub mod link;
 #[cfg(test)]
 mod tests;
-
-use crate::database::Database;
-use crate::channel::Channel;
-use crate::config::{ServerConfig, KLine, DLine, GLine, ILine, ServerLinkConfig};
-use crate::error::{IrcError, IrcResult};
-use crate::client::Client;
-use crate::ts6::TS6Message;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::net::TcpStream;
-use tokio::net::TcpListener;
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
-use chrono::{DateTime, Utc};
-use regex;
-use std::time::Duration;
-use std::sync::mpsc::{self, Sender, Receiver};
-use crate::server::link::ServerLink;
 
 pub struct Server {
     pub(crate) config: Arc<ServerConfig>,
@@ -51,9 +53,9 @@ pub struct ServerStats {
 }
 
 pub enum ServerMessage {
-    WhoisLookup { 
-        nickname: String, 
-        respond_to: mpsc::Sender<Option<WhoisInfo>> 
+    WhoisLookup {
+        nickname: String,
+        respond_to: mpsc::Sender<Option<WhoisInfo>>,
     },
 }
 
@@ -67,7 +69,7 @@ pub struct WhoisInfo {
 
 impl Server {
     const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
-    
+
     pub async fn new(config: ServerConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let database = if let Some(db_config) = &config.database {
             if db_config.persist_lines {
@@ -80,7 +82,7 @@ impl Server {
         };
 
         let (tx, rx) = mpsc::channel();
-        
+
         let server = Self {
             config: Arc::new(config),
             clients: Arc::new(RwLock::new(Vec::new())),
@@ -110,11 +112,11 @@ impl Server {
     async fn load_persisted_lines(&self, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
         // Load lines from database and merge with config
         let mut access = self.config.access.clone();
-        
+
         // Load and merge K-lines
         let db_klines = db.get_klines().await;
         access.klines.extend(db_klines);
-        
+
         // Load and merge other line types...
         Ok(())
     }
@@ -134,16 +136,16 @@ impl Server {
     // Similar methods for other line types...
 
     pub async fn run(&self) -> IrcResult<()> {
-        let addr = format!("{}:{}", 
-            self.config.server.bind_addr,
-            self.config.server.port
+        let addr = format!("{}:{}",
+                           self.config.server.bind_addr,
+                           self.config.server.port
         );
-        
+
         let listener = TcpListener::bind(&addr).await.map_err(|e| {
             error!("Failed to bind to address {}: {}", addr, e);
             IrcError::Io(e)
         })?;
-        
+
         info!("Server listening on {}", addr);
 
         loop {
@@ -151,7 +153,7 @@ impl Server {
                 Ok((socket, addr)) => {
                     info!("New connection from: {}", addr);
                     let server = Arc::new(self.clone());
-                    
+
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(socket, server).await {
                             error!("Error handling connection from {}: {}", addr, e);
@@ -218,7 +220,7 @@ impl Server {
     pub async fn find_client_by_nick(&self, nickname: &str) -> Option<Arc<Mutex<Client>>> {
         let nickname_lower = nickname.to_lowercase();
         debug!("find_client_by_nick: Looking for nickname {} (lowercase: {})", nickname, nickname_lower);
-        
+
         // First look up the client ID in the nickname map
         let client_id = {
             let nicknames = self.nickname_map.read().await;
@@ -237,25 +239,25 @@ impl Server {
 
     pub async fn get_stats(&self) -> ServerStats {
         let mut stats = ServerStats::default();
-        
+
         // Get snapshots without holding locks
         let client_count = {
             let clients = self.clients.read().await;
             clients.len()
         };
-        
+
         let channel_count = {
             let channels = self.channels.read().await;
             channels.len()
         };
-        
+
         stats.local_users = client_count;
         stats.global_users = client_count;
         stats.channel_count = channel_count;
         stats.max_local_users = client_count;
         stats.max_global_users = client_count;
         stats.server_count = 1;
-        
+
         stats
     }
 
@@ -288,7 +290,7 @@ impl Server {
         let id = client.lock().await.id();
         let mut clients = self.clients.write().await;
         let mut client_map = self.client_map.write().await;
-        
+
         clients.push(id);
         client_map.insert(id, client);
         debug!("Added client {} to server", id);
@@ -297,19 +299,19 @@ impl Server {
     // Update remove_client to be more thorough
     pub async fn remove_client(&self, id: ClientId) {
         debug!("Removing client {} from server", id);
-        
+
         // Remove from client list
         let mut clients = self.clients.write().await;
         if let Some(pos) = clients.iter().position(|&cid| cid == id) {
             clients.swap_remove(pos);
         }
-        
+
         // Remove from client map
         let mut client_map = self.client_map.write().await;
         if client_map.remove(&id).is_some() {
             info!("Removed client {} from server", id);
         }
-        
+
         // Could also clean up from channels here if needed
         debug!("Client {} cleanup completed", id);
     }
@@ -342,8 +344,8 @@ impl Server {
         let ip = client.get_ip();
         self.config.access.dlines.iter()
             .find(|dline| {
-                dline.ip == ip && 
-                !self.is_ban_expired(dline.set_time, dline.duration)
+                dline.ip == ip &&
+                    !self.is_ban_expired(dline.set_time, dline.duration)
             })
     }
 
@@ -357,8 +359,8 @@ impl Server {
         let mask = client.get_mask();
         self.config.access.glines.iter()
             .find(|gline| {
-                self.mask_match(&mask, &gline.mask) && 
-                !self.is_ban_expired(gline.set_time, gline.duration)
+                self.mask_match(&mask, &gline.mask) &&
+                    !self.is_ban_expired(gline.set_time, gline.duration)
             })
     }
 
@@ -407,16 +409,16 @@ impl Server {
 
     // Helper method to get client's hostmask
     fn get_client_mask(client: &Client) -> String {
-        format!("{}!{}@{}", 
-            client.get_nickname().map(|s| s.as_str()).unwrap_or("*"),
-            client.get_username().map(|s| s.as_str()).unwrap_or("*"),
-            client.get_hostname()
+        format!("{}!{}@{}",
+                client.get_nickname().map(|s| s.as_str()).unwrap_or("*"),
+                client.get_username().map(|s| s.as_str()).unwrap_or("*"),
+                client.get_hostname()
         )
     }
 
     pub async fn remove_from_channel(&self, channel_name: &str, client_id: u32) -> IrcResult<()> {
         debug!("Server removing client {} from channel {}", client_id, channel_name);
-        
+
         if let Some(channel) = self.get_channel(channel_name).await {
             let mut channel = channel.write().await;
             channel.remove_member(client_id);
@@ -436,7 +438,7 @@ impl Server {
     pub async fn register_nickname(&self, nickname: &str, client_id: ClientId) -> IrcResult<()> {
         let nickname_lower = nickname.to_lowercase();
         let mut nicknames = self.nickname_map.write().await;
-        
+
         if nicknames.contains_key(&nickname_lower) {
             return Err(IrcError::Protocol("Nickname is already in use".into()));
         }
@@ -455,10 +457,10 @@ impl Server {
     async fn start_registration_timeout(&self, client_id: ClientId) {
         let mut timeouts = self.registration_timeouts.write().await;
         timeouts.insert(client_id, tokio::time::Instant::now());
-        
+
         // Create a new Arc for the server
         let server = Arc::new(self.clone());
-        
+
         tokio::spawn(async move {
             tokio::time::sleep(Self::REGISTRATION_TIMEOUT).await;
             server.check_registration_timeout(client_id).await;
@@ -471,7 +473,7 @@ impl Server {
             if !client.is_registered() {
                 client.send_message(&TS6Message::new(
                     "ERROR".to_string(),
-                    vec!["Registration timeout".to_string()]
+                    vec!["Registration timeout".to_string()],
                 )).await.ok();
                 // Disconnect client
                 self.remove_client(client_id).await;
@@ -483,7 +485,7 @@ impl Server {
     pub async fn get_channel_list(&self) -> Vec<(String, usize, Option<String>)> {
         let channels = self.channels.read().await;
         let mut result = Vec::new();
-        
+
         for (name, channel) in channels.iter() {
             let channel = channel.read().await;
             result.push((
@@ -492,7 +494,7 @@ impl Server {
                 channel.get_topic()
             ));
         }
-        
+
         result
     }
 
@@ -500,20 +502,20 @@ impl Server {
     pub async fn get_client_channels(&self, client_id: u32) -> Vec<String> {
         let mut client_channels = Vec::new();
         let channels = self.channels.read().await;
-        
+
         for (channel_name, channel) in channels.iter() {
             let channel = channel.read().await;
             if channel.get_members().contains(&client_id) {
                 client_channels.push(channel_name.clone());
             }
         }
-        
+
         client_channels
     }
 
     pub async fn find_client_info(&self, nickname: &str) -> Option<WhoisInfo> {
         let (resp_tx, resp_rx) = mpsc::channel();
-        
+
         self.tx.send(ServerMessage::WhoisLookup {
             nickname: nickname.to_string(),
             respond_to: resp_tx,
@@ -524,7 +526,7 @@ impl Server {
 
     pub async fn connect_to_server(&self, config: &ServerLinkConfig) -> IrcResult<()> {
         debug!("Connecting to server {} at {}", config.name, config.address);
-        
+
         // Connect to remote server
         let stream = TcpStream::connect(&config.address).await.map_err(|e| {
             error!("Failed to connect to {}: {}", config.address, e);
@@ -642,7 +644,7 @@ impl Server {
         // Send PONG response
         let pong = TS6Message::new(
             "PONG".to_string(),
-            vec![self.config.server.name.clone(), msg.params[0].clone()]
+            vec![self.config.server.name.clone(), msg.params[0].clone()],
         );
 
         // TODO: Send to correct server
@@ -706,7 +708,7 @@ impl Server {
         // Send mode change confirmation to channel
         let mode_msg = TS6Message::new(
             "MODE".to_string(),
-            vec![channel_name.to_string(), modes.to_string()]
+            vec![channel_name.to_string(), modes.to_string()],
         );
         self.broadcast_to_channel(channel_name, &mode_msg, None).await?;
 
@@ -729,7 +731,7 @@ impl Server {
         // Send topic change confirmation
         let topic_msg = TS6Message::new(
             "TOPIC".to_string(),
-            vec![channel_name.to_string(), topic.to_string()]
+            vec![channel_name.to_string(), topic.to_string()],
         );
         self.broadcast_to_channel(channel_name, &topic_msg, None).await?;
 
@@ -742,15 +744,15 @@ pub async fn handle_connection(stream: TcpStream, server: Arc<Server>) -> IrcRes
     let addr = stream.peer_addr()?;
     stream.set_nodelay(true)?;
     debug!("Starting new connection handler for {}", addr);
-    
+
     // Split the stream
     let (reader, writer) = stream.into_split();
-    
+
     let client = Arc::new(Mutex::new(Client::new(
-        writer, 
+        writer,
         addr,
         server.config.server.name.clone(),
-        Arc::clone(&server)
+        Arc::clone(&server),
     )));
 
     let client_id = client.lock().await.id();
@@ -759,7 +761,7 @@ pub async fn handle_connection(stream: TcpStream, server: Arc<Server>) -> IrcRes
     // Start the connection handler
     let connection_future = async {
         server.add_client(Arc::clone(&client)).await;
-        
+
         let result = {
             let mut client = client.lock().await;
             client.handle_connection_with_reader(reader).await

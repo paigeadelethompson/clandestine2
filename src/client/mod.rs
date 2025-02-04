@@ -1,46 +1,45 @@
+use std::collections::{HashSet, VecDeque};
+use std::net::{IpAddr, SocketAddr};
+// Standard library imports
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+
+use chrono::Utc;
+use regex::Regex;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc::{self, UnboundedSender};
+// Tokio imports
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+// External crate imports
+use tracing::{debug, error, info, warn};
+
+pub use capability::*;
+pub use commands::*;
+// Re-exports
+// pub use handler::*;
+pub use registration::*;
+
+use crate::channel::Channel;
+use crate::config::{HostmaskConfig, ServerConfig};
+use crate::error::{IrcError, IrcResult};
+use crate::ircv3::Capability;
+// Internal crate imports
+use crate::server::Server;
+use crate::ts6::{parser::parse_message, TS6Message};
+
 // Submodules
 // mod handler;
 mod registration;
 mod capability;
 mod commands;
 
-// Standard library imports
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::collections::{HashSet, VecDeque};
-use std::time::{Duration, Instant};
-use std::net::{SocketAddr, IpAddr};
-
-// Tokio imports
-use tokio::sync::Mutex;
-use tokio::sync::mpsc::{self, UnboundedSender};
-use tokio::net::TcpStream;
-use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
-use tokio::task::JoinHandle;
-use tokio::sync::broadcast;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-
-// External crate imports
-use tracing::{debug, error, info, warn};
-use chrono::Utc;
-use regex::Regex;
-
-// Internal crate imports
-use crate::server::Server;
-use crate::ircv3::Capability;
-use crate::ts6::{TS6Message, parser::parse_message};
-use crate::error::{IrcError, IrcResult};
-use crate::config::{ServerConfig, HostmaskConfig};
-use crate::channel::Channel;
-
 #[cfg(test)]
 mod tests;
-
-// Re-exports
-// pub use handler::*;
-pub use registration::*;
-pub use capability::*;
-pub use commands::*;
 
 // Static counter for client IDs
 static NEXT_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
@@ -81,7 +80,7 @@ impl Client {
 
     pub fn new(writer: OwnedWriteHalf, addr: SocketAddr, server_name: String, server: Arc<Server>) -> Self {
         debug!("Creating new client connection from {}", addr);
-        
+
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (sendq_tx, mut sendq_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (pong_tx, _) = broadcast::channel(16);
@@ -94,7 +93,7 @@ impl Client {
         tokio::spawn(async move {
             let mut writer = writer;
             let mut current_sendq_size = 0;
-            
+
             loop {
                 tokio::select! {
                     // Handle immediate messages
@@ -168,7 +167,7 @@ impl Client {
             ping_interval,
             ping_timeout,
         };
-        
+
         client
     }
 
@@ -179,13 +178,13 @@ impl Client {
         let server_name = self.server_name.clone();
         let ping_interval = self.ping_interval;
         let ping_timeout = self.ping_timeout;
-        
+
         self.ping_timer = Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(ping_interval);
             interval.tick().await; // Skip first tick
-            
+
             let mut last_ping = None;
-            
+
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -231,10 +230,10 @@ impl Client {
     pub async fn send_message(&self, message: &TS6Message) -> IrcResult<()> {
         let msg_string = message.to_string();
         debug!("Sending message to client {}: {:?}", self.id, msg_string);
-        
+
         let mut data = msg_string.into_bytes();
         data.extend_from_slice(b"\r\n");
-        
+
         // Use sendq for normal messages
         self.sendq_tx.send(data).map_err(|_| {
             let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Channel closed");
@@ -250,7 +249,7 @@ impl Client {
         if !data.ends_with(b"\r\n") {
             data.extend_from_slice(b"\r\n");
         }
-        
+
         // Use immediate channel for raw writes
         self.tx.send(data).map_err(|_| {
             let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Channel closed");
@@ -264,10 +263,10 @@ impl Client {
     }
 
     pub fn get_mask(&self) -> String {
-        format!("{}!{}@{}", 
-            self.nickname.as_ref().unwrap_or(&"*".to_string()),
-            self.username.as_ref().unwrap_or(&"*".to_string()),
-            self.hostname
+        format!("{}!{}@{}",
+                self.nickname.as_ref().unwrap_or(&"*".to_string()),
+                self.username.as_ref().unwrap_or(&"*".to_string()),
+                self.hostname
         )
     }
 
@@ -288,15 +287,15 @@ impl Client {
     pub async fn send_numeric(&self, numeric: u16, params: &[&str]) -> IrcResult<()> {
         let numeric_str = format!("{:03}", numeric);
         let mut message_params = vec![];
-        
+
         if let Some(nick) = &self.nickname {
             message_params.push(nick.clone());
         } else {
             message_params.push("*".to_string());
         }
-        
+
         message_params.extend(params.iter().map(|&s| s.to_string()));
-        
+
         let mut message = TS6Message::new(numeric_str, message_params);
         // Add server name as source for numeric replies
         message.source = Some(self.server_name.clone());
@@ -337,7 +336,7 @@ impl Client {
 
     pub async fn cleanup(&mut self) {
         debug!("Cleaning up client {}", self.id);
-        
+
         // Cancel the ping timer if it exists
         if let Some(timer) = self.ping_timer.take() {
             timer.abort();
@@ -350,7 +349,7 @@ impl Client {
                 let quit_msg = TS6Message::with_source(
                     self.get_prefix(),
                     "QUIT".to_string(),
-                    vec!["Connection closed".to_string()]
+                    vec!["Connection closed".to_string()],
                 );
                 self.server.broadcast_to_channel(&channel, &quit_msg, Some(self.id)).await.ok();
                 self.server.remove_from_channel(&channel, self.id).await.ok();
@@ -368,10 +367,10 @@ impl Client {
 
     pub async fn handle_connection_with_reader(&mut self, mut reader: OwnedReadHalf) -> IrcResult<()> {
         let mut lines = BufReader::new(reader).lines();
-        
+
         while let Some(line) = lines.next_line().await? {
             debug!("Received line from client {}: {}", self.id, line);
-            
+
             // Parse the message - add & to borrow the line
             if let Ok(message) = parse_message(&line) {
                 // Process the message
@@ -382,13 +381,13 @@ impl Client {
                 self.send_numeric(421, &["Unknown command"]).await?;
             }
         }
-        
+
         Ok(())
     }
 
     pub(crate) async fn handle_message(&mut self, message: TS6Message) -> IrcResult<()> {
         debug!("Handling message: {:?}", message);
-        
+
         match message.command.as_str() {
             // CAP must be handled first
             "CAP" => {
@@ -397,7 +396,7 @@ impl Client {
                 self.write_raw(b"").await?;
                 result
             }
-            
+
             // During CAP negotiation, buffer commands instead of rejecting
             cmd if self.cap_negotiating => {
                 if cmd == "QUIT" {
@@ -408,7 +407,7 @@ impl Client {
                     Ok(())
                 }
             }
-            
+
             // Normal command handling
             "NICK" => self.handle_nick(message).await,
             "USER" => self.handle_user(message).await,
@@ -416,27 +415,27 @@ impl Client {
             "JOIN" => {
                 debug!("Received JOIN command with params: {:?}", message.params);
                 self.handle_join(message).await
-            },
+            }
             "PART" => {
                 debug!("Received PART command with params: {:?}", message.params);
                 self.handle_part(message).await
-            },
+            }
             "WHOIS" => {
                 debug!("Received WHOIS command with params: {:?}", message.params);
                 self.handle_whois(message).await
-            },
+            }
             "PING" => self.handle_ping(message).await,
             "PONG" => self.handle_pong(message).await,
             "MODE" => {
-                let target = message.params.get(0).ok_or_else(|| 
-                    IrcError::Protocol("No mode target".into()))?;
-                
+                let target = message.params.get(0).ok_or_else(||
+                IrcError::Protocol("No mode target".into()))?;
+
                 if target.starts_with('#') {
                     self.handle_channel_mode(message).await
                 } else {
                     self.handle_user_mode(message).await
                 }
-            },
+            }
             "PRIVMSG" => self.handle_privmsg(message).await,
             "NOTICE" => self.handle_notice(message).await,
             "MOTD" => self.handle_motd(message).await,

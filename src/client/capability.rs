@@ -1,13 +1,15 @@
-use crate::error::{IrcError, IrcResult};
-use crate::ts6::TS6Message;
-use crate::ircv3::Capability;
 use tracing::{debug, warn};
+
+use crate::error::{IrcError, IrcResult};
+use crate::ircv3::Capability;
+use crate::ts6::TS6Message;
+
 use super::Client;
 
 impl Client {
     pub(crate) async fn handle_cap_command(&mut self, message: TS6Message) -> IrcResult<()> {
         debug!("Handling CAP command: {:?}", message);
-        
+
         if message.params.is_empty() {
             return Err(IrcError::Protocol("No CAP subcommand".into()));
         }

@@ -1,11 +1,13 @@
-use crate::error::{IrcError, IrcResult};
-use crate::ts6::TS6Message;
-use crate::ts6::parser::parse_message;
-use tokio::net::{TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}};
-use tokio::io::{BufReader, AsyncBufReadExt, AsyncWriteExt};
-use std::sync::Arc;
-use tracing::{debug, info, warn};
 use std::io;
+use std::sync::Arc;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{tcp::{OwnedReadHalf, OwnedWriteHalf}, TcpStream};
+use tracing::{debug, info, warn};
+
+use crate::error::{IrcError, IrcResult};
+use crate::ts6::parser::parse_message;
+use crate::ts6::TS6Message;
 
 pub struct ServerLink {
     name: String,
@@ -45,7 +47,7 @@ impl ServerLink {
             if self.reader.read_line(&mut line).await? == 0 {
                 break; // EOF
             }
-            
+
             match parse_message(&line) {
                 Ok(msg) => {
                     self.handle_message(msg).await?;
@@ -95,10 +97,10 @@ impl ServerLink {
     async fn send_burst(&mut self) -> IrcResult<()> {
         // Send all local users
         self.send_users_burst().await?;
-        
+
         // Send all channels
         self.send_channels_burst().await?;
-        
+
         // End of burst
         let eob_msg = TS6Message::new("EOB".to_string(), vec![]);
         self.send_message(&eob_msg).await
@@ -130,7 +132,7 @@ impl ServerLink {
             "PING" => {
                 let pong = TS6Message::new(
                     "PONG".to_string(),
-                    message.params
+                    message.params,
                 );
                 self.send_message(&pong).await?;
             }

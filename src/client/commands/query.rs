@@ -1,8 +1,10 @@
+use regex::Regex;
+use tracing::{debug, warn};
+
 use crate::error::{IrcError, IrcResult};
 use crate::ts6::TS6Message;
-use tracing::{debug, warn};
+
 use super::super::Client;
-use regex::Regex;
 
 impl Client {
     pub(crate) async fn handle_whois(&mut self, message: TS6Message) -> IrcResult<()> {
@@ -131,7 +133,7 @@ impl Client {
     pub(crate) async fn handle_list(&mut self, message: TS6Message) -> IrcResult<()> {
         // RPL_LISTSTART (321)
         self.send_numeric(321, &["Channel", "Users  Name"]).await?;
-        
+
         // Get all channels through the public interface
         let channel_list = self.server.get_channel_list().await;
         for (name, user_count, topic) in channel_list {
@@ -142,7 +144,7 @@ impl Client {
                 &topic.as_deref().unwrap_or("")
             ]).await?;
         }
-        
+
         // RPL_LISTEND (323)
         self.send_numeric(323, &["End of /LIST"]).await?;
         Ok(())
@@ -173,7 +175,7 @@ impl Client {
             let msg = TS6Message::with_source(
                 self.get_prefix(),
                 "PRIVMSG".to_string(),
-                vec![target.to_string(), text.to_string()]
+                vec![target.to_string(), text.to_string()],
             );
 
             // Broadcast to channel (excluding sender)
@@ -184,9 +186,9 @@ impl Client {
                 let msg = TS6Message::with_source(
                     self.get_prefix(),
                     "PRIVMSG".to_string(),
-                    vec![target.to_string(), text.to_string()]
+                    vec![target.to_string(), text.to_string()],
                 );
-                
+
                 let target_client = target_client.lock().await;
                 target_client.send_message(&msg).await
             } else {
@@ -217,7 +219,7 @@ impl Client {
                 let msg = TS6Message::with_source(
                     self.get_prefix(),
                     "NOTICE".to_string(),
-                    vec![target.to_string(), text.to_string()]
+                    vec![target.to_string(), text.to_string()],
                 );
 
                 // Broadcast to channel (excluding sender)
@@ -229,9 +231,9 @@ impl Client {
                 let msg = TS6Message::with_source(
                     self.get_prefix(),
                     "NOTICE".to_string(),
-                    vec![target.to_string(), text.to_string()]
+                    vec![target.to_string(), text.to_string()],
                 );
-                
+
                 let target_client = target_client.lock().await;
                 target_client.send_message(&msg).await?;
             }

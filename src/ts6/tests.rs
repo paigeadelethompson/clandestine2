@@ -16,10 +16,7 @@ mod parser_tests {
 
 #[cfg(test)]
 mod integration_tests {
-    use std::sync::Arc;
-    use crate::server::Server;
-    use crate::test_utils::{TestClient, setup_test_server};
-    use std::net::SocketAddr;
+    use crate::test_utils::{setup_test_server, TestClient};
 
     const PORT_TS6_SERVER_LINK: u16 = 6931;
 

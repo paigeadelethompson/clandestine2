@@ -1,7 +1,9 @@
-use crate::config::ServerConfig;
 use std::net::SocketAddr;
-use tokio::time::{sleep, Duration};
+
 use tokio::net::TcpStream;
+use tokio::time::{Duration, sleep};
+
+use crate::config::ServerConfig;
 
 #[cfg(test)]
 pub(crate) mod test {

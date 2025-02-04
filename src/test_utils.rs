@@ -1,12 +1,14 @@
-use std::net::SocketAddr;
-use tokio::net::{TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}};
-use tokio::io::{AsyncWriteExt, BufReader, AsyncBufReadExt};
-use crate::error::{IrcError, IrcResult};
 use std::collections::HashSet;
-use crate::config::ServerConfig;
-use crate::server::Server;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{tcp::{OwnedReadHalf, OwnedWriteHalf}, TcpStream};
+use tokio::time::{Duration, sleep};
+
+use crate::config::ServerConfig;
+use crate::error::{IrcError, IrcResult};
+use crate::server::Server;
 
 #[cfg(test)]
 pub struct TestClient {
@@ -23,7 +25,7 @@ impl TestClient {
     pub async fn connect(addr: SocketAddr) -> IrcResult<Self> {
         let stream = TcpStream::connect(addr).await?;
         let (read, write) = stream.into_split();
-        
+
         Ok(Self {
             reader: BufReader::new(read),
             writer: write,
@@ -58,10 +60,10 @@ impl TestClient {
         // Send registration sequence
         self.send_nick(nickname).await?;
         self.send_user(username, hostname).await?;
-        
+
         // Wait for registration response
         self.expect_welcome().await?;
-        
+
         Ok(())
     }
 
@@ -84,7 +86,7 @@ impl TestClient {
                     .filter(|s| !s.is_empty())
                     .filter(|cap| self.should_request_cap(cap))
                     .collect();
-                
+
                 return Ok(caps);
             }
         }
@@ -154,10 +156,10 @@ impl TestClient {
             }
 
             let msg = self.read_message().await?;
-            
+
             // Log message for debugging
             tracing::debug!("Registration message: {}", msg);
-            
+
             // Check for success or failure conditions
             if msg.contains("001") {  // RPL_WELCOME
                 return Ok(());
@@ -166,9 +168,9 @@ impl TestClient {
                 return Err(IrcError::Protocol("Nickname already in use".to_string()));
             }
             if msg.contains("465") {  // ERR_YOUREBANNEDCREEP
-                return Err(IrcError::Protocol("You are banned".to_string())); 
+                return Err(IrcError::Protocol("You are banned".to_string()));
             }
-            
+
             // Small delay to prevent tight loop
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -210,7 +212,7 @@ impl TestClient {
 
     pub async fn get_topic(&mut self, channel: &str) -> IrcResult<String> {
         self.send_raw(&format!("TOPIC {}", channel)).await?;
-        
+
         loop {
             let msg = self.read_message().await?;
             if msg.contains("332") {  // RPL_TOPIC
@@ -267,7 +269,7 @@ impl TestClient {
 // Common test server setup
 pub async fn setup_test_server(port: u16) -> (Arc<Server>, SocketAddr) {
     let server = Arc::new(Server::new(test_config(port)).await.unwrap());
-    
+
     // Start server properly
     let server_clone = Arc::clone(&server);
     tokio::spawn(async move {
@@ -276,7 +278,7 @@ pub async fn setup_test_server(port: u16) -> (Arc<Server>, SocketAddr) {
 
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     wait_for_server(&addr).await;
-    
+
     (server, addr)
 }
 

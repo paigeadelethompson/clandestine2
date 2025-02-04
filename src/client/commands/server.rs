@@ -1,22 +1,25 @@
+use std::time::Instant;
+
+use chrono::Local;
+use tracing::debug;
 use tracing::warn;
-use super::*;
+
 use crate::error::{IrcError, IrcResult};
 use crate::ts6::TS6Message;
-use tracing::debug;
+
+use super::*;
 use super::super::Client;
-use chrono::Local;
-use std::time::Instant;
 
 impl Client {
     pub(crate) async fn handle_ping(&mut self, message: TS6Message) -> IrcResult<()> {
         debug!("Received PING from client {}", self.id);
-        
+
         // Get the cookie parameter
         let cookie = message.params.first()
             .ok_or_else(|| IrcError::Protocol("No ping parameter".into()))?;
-            
+
         debug!("Sending PONG response to client {} with cookie: {}", self.id, cookie);
-        
+
         // Send PONG response with the same cookie value
         let pong = format!(":{} PONG :{}\r\n", self.server_name, cookie);
         self.write_raw(pong.as_bytes()).await
@@ -79,7 +82,7 @@ impl Client {
 
     pub(crate) async fn handle_lusers(&mut self, _message: TS6Message) -> IrcResult<()> {
         let stats = self.server.get_stats().await;
-        
+
         // RPL_LUSERCLIENT (251)
         self.send_numeric(251, &[&format!(
             "There are {} users and {} invisible on 1 server",

@@ -1,6 +1,8 @@
+use tracing::{debug, info, warn};
+
 use crate::error::{IrcError, IrcResult};
 use crate::ts6::TS6Message;
-use tracing::{debug, info, warn};
+
 use super::super::Client;
 
 impl Client {
@@ -38,7 +40,7 @@ impl Client {
         if !self.server.has_oline(self).await {
             return Err(IrcError::Protocol("Permission Denied".into()));
         }
-        
+
         if message.params.len() < 2 {
             return Err(IrcError::Protocol("Not enough parameters".into()));
         }
@@ -104,7 +106,7 @@ impl Client {
         let wallops_msg = TS6Message::with_source(
             self.get_prefix(),
             "WALLOPS".to_string(),
-            vec![text.clone()]
+            vec![text.clone()],
         );
 
         // Broadcast to all users with +w mode
