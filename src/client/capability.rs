@@ -40,8 +40,4 @@ impl Client {
 
         Ok(())
     }
-
-    pub fn has_capability(&self, cap: &Capability) -> bool {
-        self.enabled_capabilities.contains(cap)
-    }
 } 

@@ -8,7 +8,6 @@ use crate::error::{IrcError, IrcResult};
 use crate::ts6::TS6Message;
 
 use super::*;
-use super::super::Client;
 
 impl Client {
     pub(crate) async fn handle_ping(&mut self, message: TS6Message) -> IrcResult<()> {
@@ -50,12 +49,6 @@ impl Client {
             &self.server_name,
             "Available on GitHub"
         ]).await?;
-        Ok(())
-    }
-
-    pub(crate) async fn handle_time(&mut self, _message: TS6Message) -> IrcResult<()> {
-        let time = Local::now();
-        self.send_numeric(391, &[&self.server_name, &time.to_rfc2822()]).await?;
         Ok(())
     }
 

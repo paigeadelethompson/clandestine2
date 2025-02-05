@@ -56,4 +56,8 @@ impl Client {
         debug!("Completed registration sequence for client {}", self.id);
         Ok(())
     }
+
+    pub fn is_registered(&self) -> bool {
+        self.registered
+    }
 } 

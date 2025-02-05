@@ -36,12 +36,15 @@ mod tests {
     async fn test_channel_join() {
         let (_server, addr) = setup_test_server(PORT_CHANNEL_JOIN).await;
 
-        // Connect and register two clients
+        // Connect and register first client
         let mut client1 = TestClient::connect(addr).await.unwrap();
-        client1.register("nick1", "user1", "test.com").await.unwrap();
+        let result = client1.register("nick1", "user1", "test.com").await;
+        assert!(result.is_ok(), "First client registration failed: {:?}", result);
 
+        // Connect and register second client
         let mut client2 = TestClient::connect(addr).await.unwrap();
-        client2.register("nick2", "user2", "test.com").await.unwrap();
+        let result = client2.register("nick2", "user2", "test.com").await;
+        assert!(result.is_ok(), "Second client registration failed: {:?}", result);
 
         // First client creates channel
         client1.join("#test").await.unwrap();

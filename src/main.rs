@@ -22,6 +22,7 @@ mod database;
 mod test_utils;
 #[cfg(test)]
 mod test_helpers;
+mod link;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

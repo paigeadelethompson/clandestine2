@@ -1,6 +1,5 @@
 use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-// Standard library imports
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -12,34 +11,33 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{self, UnboundedSender};
-// Tokio imports
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-// External crate imports
 use tracing::{debug, error, info, warn};
 
 pub use capability::*;
-pub use commands::*;
-// Re-exports
-// pub use handler::*;
 pub use registration::*;
 
 use crate::channel::Channel;
 use crate::config::{HostmaskConfig, ServerConfig};
 use crate::error::{IrcError, IrcResult};
 use crate::ircv3::Capability;
-// Internal crate imports
 use crate::server::Server;
 use crate::ts6::{parser::parse_message, TS6Message};
 
-// Submodules
-// mod handler;
 mod registration;
 mod capability;
-mod commands;
 
 #[cfg(test)]
 mod tests;
+mod ping;
+mod message;
+mod error;
+mod numeric;
+mod channel;
+mod query;
+mod server;
+mod user;
 
 // Static counter for client IDs
 static NEXT_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
@@ -171,79 +169,6 @@ impl Client {
         client
     }
 
-    fn start_ping_timer(&mut self) {
-        let client_id = self.id;
-        let tx = self.sendq_tx.clone();  // Use sendq_tx instead of tx for PINGs
-        let mut pong_rx = self.pong_tx.subscribe();
-        let server_name = self.server_name.clone();
-        let ping_interval = self.ping_interval;
-        let ping_timeout = self.ping_timeout;
-
-        self.ping_timer = Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(ping_interval);
-            interval.tick().await; // Skip first tick
-
-            let mut last_ping = None;
-
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let now = Instant::now();
-                        
-                        // Only check timeout if we've sent a ping
-                        if let Some(ping_time) = last_ping {
-                            if now.duration_since(ping_time) > ping_timeout {
-                                debug!("Client {} ping timeout - no PONG received", client_id);
-                                let timeout_msg = "ERROR :Ping timeout\r\n".as_bytes().to_vec();
-                                if tx.send(timeout_msg).is_err() {
-                                    debug!("Failed to send timeout message - channel closed");
-                                }
-                                break;
-                            }
-                        }
-
-                        // Send a new ping - add colon before param to match client's PONG format
-                        debug!("Server sending PING to client {}", client_id);
-                        let ping_msg = format!(":{} PING :{}\r\n", server_name, server_name);
-                        match tx.send(ping_msg.into_bytes()) {
-                            Ok(_) => {
-                                debug!("Successfully queued PING message for client {}", client_id);
-                                last_ping = Some(now);
-                            }
-                            Err(e) => {
-                                debug!("Failed to send PING message: {} - channel closed", e);
-                                break;
-                            }
-                        }
-                    }
-                    
-                    Ok(_) = pong_rx.recv() => {
-                        debug!("Received PONG update for client {}", client_id);
-                        last_ping = None; // Reset ping timer when we get a PONG
-                    }
-                }
-            }
-            debug!("Ping timer task exiting for client {}", client_id);
-        }));
-    }
-
-    pub async fn send_message(&self, message: &TS6Message) -> IrcResult<()> {
-        let msg_string = message.to_string();
-        debug!("Sending message to client {}: {:?}", self.id, msg_string);
-
-        let mut data = msg_string.into_bytes();
-        data.extend_from_slice(b"\r\n");
-
-        // Use sendq for normal messages
-        self.sendq_tx.send(data).map_err(|_| {
-            let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Channel closed");
-            IrcError::Io(err)
-        })?;
-
-        debug!("Successfully queued message for client {}", self.id);
-        Ok(())
-    }
-
     pub async fn write_raw(&self, data: &[u8]) -> IrcResult<()> {
         let mut data = data.to_vec();
         if !data.ends_with(b"\r\n") {
@@ -256,10 +181,6 @@ impl Client {
             IrcError::Io(err)
         })?;
         Ok(())
-    }
-
-    pub fn is_registered(&self) -> bool {
-        self.registered
     }
 
     pub fn get_mask(&self) -> String {
@@ -277,29 +198,6 @@ impl Client {
             // This should never happen for registered users, but just in case
             format!("unknown@{}", self.hostname)
         }
-    }
-
-    pub async fn send_error(&self, msg: &str) -> IrcResult<()> {
-        let error_msg = format!("ERROR :{}\r\n", msg);
-        self.write_raw(error_msg.as_bytes()).await
-    }
-
-    pub async fn send_numeric(&self, numeric: u16, params: &[&str]) -> IrcResult<()> {
-        let numeric_str = format!("{:03}", numeric);
-        let mut message_params = vec![];
-
-        if let Some(nick) = &self.nickname {
-            message_params.push(nick.clone());
-        } else {
-            message_params.push("*".to_string());
-        }
-
-        message_params.extend(params.iter().map(|&s| s.to_string()));
-
-        let mut message = TS6Message::new(numeric_str, message_params);
-        // Add server name as source for numeric replies
-        message.source = Some(self.server_name.clone());
-        self.send_message(&message).await
     }
 
     pub fn get_username(&self) -> Option<&String> {
@@ -383,72 +281,6 @@ impl Client {
         }
 
         Ok(())
-    }
-
-    pub(crate) async fn handle_message(&mut self, message: TS6Message) -> IrcResult<()> {
-        debug!("Handling message: {:?}", message);
-
-        match message.command.as_str() {
-            // CAP must be handled first
-            "CAP" => {
-                let result = self.handle_cap_command(message).await;
-                // Force a flush after CAP command to ensure response is sent
-                self.write_raw(b"").await?;
-                result
-            }
-
-            // During CAP negotiation, buffer commands instead of rejecting
-            cmd if self.cap_negotiating => {
-                if cmd == "QUIT" {
-                    self.handle_quit(message).await
-                } else {
-                    // Buffer command until CAP END
-                    debug!("Buffering command {} during CAP negotiation", cmd);
-                    Ok(())
-                }
-            }
-
-            // Normal command handling
-            "NICK" => self.handle_nick(message).await,
-            "USER" => self.handle_user(message).await,
-            "QUIT" => self.handle_quit(message).await,
-            "JOIN" => {
-                debug!("Received JOIN command with params: {:?}", message.params);
-                self.handle_join(message).await
-            }
-            "PART" => {
-                debug!("Received PART command with params: {:?}", message.params);
-                self.handle_part(message).await
-            }
-            "WHOIS" => {
-                debug!("Received WHOIS command with params: {:?}", message.params);
-                self.handle_whois(message).await
-            }
-            "PING" => self.handle_ping(message).await,
-            "PONG" => self.handle_pong(message).await,
-            "MODE" => {
-                let target = message.params.get(0).ok_or_else(||
-                IrcError::Protocol("No mode target".into()))?;
-
-                if target.starts_with('#') {
-                    self.handle_channel_mode(message).await
-                } else {
-                    self.handle_user_mode(message).await
-                }
-            }
-            "PRIVMSG" => self.handle_privmsg(message).await,
-            "NOTICE" => self.handle_notice(message).await,
-            "MOTD" => self.handle_motd(message).await,
-            "LUSERS" => self.handle_lusers(message).await,
-            "VERSION" => self.handle_version(message).await,
-            "ADMIN" => self.handle_admin(message).await,
-            "INFO" => self.handle_info(message).await,
-            "WHO" => self.handle_who(message).await,
-            cmd => {
-                warn!("Unknown command from client {}: {}", self.id, cmd);
-                self.send_numeric(421, &[&message.command, "Unknown command"]).await
-            }
-        }
     }
 
     pub fn set_nickname(&mut self, nickname: String) -> IrcResult<()> {

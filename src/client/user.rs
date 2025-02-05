@@ -1,9 +1,8 @@
 use tracing::{debug, info};
 
+use crate::client::Client;
 use crate::error::{IrcError, IrcResult};
 use crate::ts6::TS6Message;
-
-use super::super::Client;
 
 impl Client {
     pub(crate) async fn handle_nick(&mut self, message: TS6Message) -> IrcResult<()> {

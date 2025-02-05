@@ -1,10 +1,9 @@
 use regex::Regex;
 use tracing::{debug, warn};
 
+use crate::client::Client;
 use crate::error::{IrcError, IrcResult};
 use crate::ts6::TS6Message;
-
-use super::super::Client;
 
 impl Client {
     pub(crate) async fn handle_whois(&mut self, message: TS6Message) -> IrcResult<()> {
@@ -36,117 +35,64 @@ impl Client {
     }
 
     pub(crate) async fn handle_who(&mut self, message: TS6Message) -> IrcResult<()> {
-        let target = message.params.get(0);
-        let flags = message.params.get(1).map(|s| s.as_str()).unwrap_or("");
-
-        match target {
-            Some(channel_name) if channel_name.starts_with('#') => {
-                // WHO on a channel
-                if let Some(channel) = self.server.get_channel(channel_name).await {
-                    let channel = channel.read().await;
-                    let member_ids = channel.get_members();
-
-                    for &member_id in member_ids {
-                        if let Some(member) = self.server.get_client(member_id).await {
-                            let member = member.lock().await;
-                            if let (Some(nick), Some(user)) = (member.get_nickname(), member.get_username()) {
-                                self.send_numeric(352, &[
-                                    channel_name,
-                                    user,
-                                    member.get_hostname(),
-                                    &self.server_name,
-                                    nick,
-                                    "H", // Here
-                                    "0", // Hop count
-                                    member.get_realname().map_or("", String::as_str),
-                                ]).await?;
-                            }
-                        }
-                    }
-                }
-            }
-            Some(mask) => {
-                // WHO on a mask
-                let clients = self.server.get_all_clients().await;
-                for client in clients {
-                    let client = client.lock().await;
-                    if let Some(nick) = client.get_nickname() {
-                        if self.server.mask_match(nick, mask) {
-                            if let Some(user) = client.get_username() {
-                                self.send_numeric(352, &[
-                                    "*",
-                                    user,
-                                    client.get_hostname(),
-                                    &self.server_name,
-                                    nick,
-                                    "H", // Here
-                                    "0", // Hop count
-                                    client.get_realname().map_or("", String::as_str),
-                                ]).await?;
-                            }
-                        }
-                    }
-                }
-            }
-            None => {
-                // WHO with no target - list all visible users
-                let clients = self.server.get_all_clients().await;
-                for client in clients {
-                    let client = client.lock().await;
-                    if let (Some(nick), Some(user)) = (client.get_nickname(), client.get_username()) {
-                        // Skip invisible users unless operator
-                        if client.modes.contains(&'i') && !self.modes.contains(&'o') {
-                            continue;
-                        }
-                        self.send_numeric(352, &[
-                            "*",
-                            user,
-                            client.get_hostname(),
-                            &self.server_name,
-                            nick,
-                            "H", // Here
-                            "0", // Hop count
-                            client.get_realname().map_or("", String::as_str),
-                        ]).await?;
-                    }
-                }
-            }
-        }
-
-        // End of WHO list
-        self.send_numeric(315, &[target.map_or("*", |v| v), "End of WHO list"]).await?;
-        Ok(())
-    }
-
-    pub(crate) async fn handle_whowas(&mut self, message: TS6Message) -> IrcResult<()> {
         if message.params.is_empty() {
-            return Err(IrcError::Protocol("No nickname given".into()));
+            return Err(IrcError::Protocol("No WHO target".into()));
         }
 
-        // WHOWAS is not implemented yet since we don't store history
-        self.send_numeric(406, &[&message.params[0], "There was no such nickname"]).await?;
-        self.send_numeric(369, &[&message.params[0], "End of WHOWAS"]).await?;
+        let target = &message.params[0];
 
-        Ok(())
-    }
+        if target.starts_with('#') {
+            // Channel WHO
+            let channel = self.server.get_channel(target).await
+                .ok_or_else(|| IrcError::Protocol("No such channel".into()))?;
+            let channel = channel.read().await;
 
-    pub(crate) async fn handle_list(&mut self, message: TS6Message) -> IrcResult<()> {
-        // RPL_LISTSTART (321)
-        self.send_numeric(321, &["Channel", "Users  Name"]).await?;
+            // Send WHO reply for each member
+            for &member_id in channel.get_members() {
+                if let Some(member) = self.server.get_client(member_id).await {
+                    let member = member.lock().await;
+                    let nick = member.get_nickname().unwrap();
+                    let user = member.get_username().unwrap();
+                    let host = member.get_hostname();
+                    let modes = if channel.has_mode('o', Some(nick)) { "@" } else { "" };
 
-        // Get all channels through the public interface
-        let channel_list = self.server.get_channel_list().await;
-        for (name, user_count, topic) in channel_list {
-            // RPL_LIST (322)
-            self.send_numeric(322, &[
-                &name,
-                &user_count.to_string(),
-                &topic.as_deref().unwrap_or("")
-            ]).await?;
+                    // RPL_WHOREPLY
+                    self.send_numeric(352, &[
+                        target,
+                        user,
+                        host,
+                        self.server_name.as_str(),
+                        nick,
+                        &format!("H{}", modes),
+                        "0",
+                        &member.get_realname().map_or_else(String::new, |s| s.to_string()),
+                    ]).await?;
+                }
+            }
+        } else {
+            // User WHO
+            if let Some(client) = self.server.find_client_by_nick(target).await {
+                let client = client.lock().await;
+                let nick = client.get_nickname().unwrap();
+                let user = client.get_username().unwrap();
+                let host = client.get_hostname();
+
+                self.send_numeric(352, &[
+                    "*",
+                    user,
+                    host,
+                    self.server_name.as_str(),
+                    nick,
+                    "H",
+                    "0",
+                    &client.get_realname().map_or_else(String::new, |s| s.to_string()),
+                ]).await?;
+            }
         }
 
-        // RPL_LISTEND (323)
-        self.send_numeric(323, &["End of /LIST"]).await?;
+        // RPL_ENDOFWHO
+        self.send_numeric(315, &[target, "End of WHO list"]).await?;
+
         Ok(())
     }
 
